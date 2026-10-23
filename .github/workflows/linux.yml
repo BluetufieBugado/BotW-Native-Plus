@@ -1,0 +1,35 @@
+# Linux Vulkan build plus a headless device/swapchain smoke test (no game files).
+name: Linux (Vulkan)
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config git \
+            libvulkan-dev vulkan-tools mesa-vulkan-drivers \
+            libx11-dev libxrender-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxss-dev libxkbcommon-dev libxcb1-dev libx11-xcb-dev libwayland-dev \
+            libfmt-dev libboost-dev libglm-dev libssl-dev libpng-dev libzstd-dev zlib1g-dev \
+            libasound2-dev libpulse-dev libdbus-1-dev libusb-1.0-0-dev libegl1-mesa-dev libdecor-0-dev libxtst-dev xvfb
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Vulkan device smoke test
+        run: |
+          set +e
+          xvfb-run -a -s "-screen 0 1280x720x24" env SDL_VIDEODRIVER=x11 BOTW_USER_ROOT="$RUNNER_TEMP/botw" \
+            ./build/BotWRecomp --mute
+          code=$?
+          set -e
+          # 2 means the device came up and the process stopped because no game dump is present.
+          test "$code" -eq 2
+          grep -q "vulkan device:" "$RUNNER_TEMP/botw/runtime.log"
