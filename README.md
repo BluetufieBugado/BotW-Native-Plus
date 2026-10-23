@@ -1,19 +1,36 @@
 # BotW Recompiled for Windows
 
-Breath of the Wild (Wii U) boots and plays on **Windows 10 and Windows 11** with Vulkan. The
-PowerPC game code is statically recompiled to C++ and runs on a Cafe OS runtime. Cemu's Latte
-GPU layer draws through Vulkan. There is no emulator and no JIT.
+<!-- Demo clip goes here -->
 
-Verified on an RTX 5060 laptop with 16 GB of RAM, from a USA v208 (1.5.0) dump: the title
-screen, the intro, the wake-up scene, and gameplay in the Shrine of Resurrection, at 60 fps
-(about 2000–3700 draws per frame in the shrine, 22–34 AX voices). That session ran 180 seconds
-with no assert and no crash. The title screen in that run was the pulsing "(A) Start" prompt,
-the version line, and the corner icons. The Zelda logo, the TitleBG background, and the title
-music were not playing before A was pressed. See [Known issues](#known-issues).
+Breath of the Wild (Wii U) running on **Windows 10 and Windows 11** with Vulkan. The
+PowerPC game code is statically recompiled to C++ and runs on a Cafe OS runtime. Cemu's Latte
+GPU layer draws through Vulkan. There is no emulator and no JIT. This is work in progress and
+not a full-game release.
+
+## What works
+
+Tested on an RTX 5060 laptop with 16 GB of RAM, from a USA v208 (1.5.0) game folder, at about
+60 fps:
+
+- the opening
+- the title screen with the logo
+- loading a save
+- combat
+- the map and fast travel
+- Hateno Village, with NPCs and shops
+
+Not working or not confirmed yet:
+
+- Audio is not working yet.
+- Some effects, parts of the controller mapping, and some cutscene text are unconfirmed or
+  incomplete.
+- Everything not listed above has not been checked. See [Known issues](#known-issues).
 
 > [!IMPORTANT]
-> This repository contains no game files, no keys, and no game code. You supply your own
-> legally dumped copy. Nothing here is a download for the game.
+> This repository contains no game files, no keys, and no decryption tools. You must supply
+> your own legally obtained copy of the game, as an already-extracted game folder (`code/`,
+> `content/`, `meta/`). Nothing here is a download for the game. This is an unofficial fan
+> project and is not affiliated with or endorsed by Nintendo.
 
 ## Requirements
 
@@ -21,9 +38,9 @@ music were not playing before A was pressed. See [Known issues](#known-issues).
   RTX 5060 laptop.
 - [MSYS2](https://www.msys2.org/) with the **UCRT64** environment. The Cafe runtime uses
   pthreads, so the build is MinGW gcc. MSVC and clang-cl are not supported.
-- Your own legally dumped **Breath of the Wild for Wii U, USA, with update v208 (1.5.0)**.
-  The recompiler and the game patches match that executable. The dump is one folder with
-  three directories in it:
+- Your own legally obtained **Breath of the Wild for Wii U, USA, with update v208 (1.5.0)**,
+  as an already-extracted game folder. The recompiler and the game patches match that
+  executable. The folder has three directories in it:
 
   ```text
   game/
@@ -118,27 +135,31 @@ F1 opens the settings menu. F11 toggles fullscreen.
 
 ## Known issues
 
-- **Title logo, TitleBG, and title music.** Before A is pressed, the verified run drew the
-  prompt and stayed silent (5 draws per frame). Gameplay after A is what the 60 fps shrine
-  result covers. That fix is not in this branch.
 - **Title-to-intro hitch.** One slow frame of about 2 seconds, a CPU texture untile, then the
   game recovered. It did not crash.
 - **First-run shaders.** Pipelines compile on first use, so the first time through a scene
   hitches. Later runs use the cache under `%APPDATA%\BotWRecomp`.
-- **A few cutscenes stay at 30 fps** on purpose. The shrine gameplay in the verified run was
-  60 fps.
-- **Beyond the shrine.** The verified session is the opening through the Shrine of
-  Resurrection. A long open-world session is not part of that result. DLC is untested.
+- **A few cutscenes stay at 30 fps** on purpose. Gameplay runs at about 60 fps.
+- **Audio** is not working yet.
+- **Effects, controller mapping, cutscene text.** Some effects, parts of the controller
+  mapping, and some cutscene text are unconfirmed or incomplete.
+- **Coverage.** Only the areas listed under [What works](#what-works) were checked. A long
+  open-world session is not part of that result. DLC is untested.
 - **Linux.** The Vulkan backend configures and compiles. Without game files the process
   brings up a device and swapchain, presents one empty frame, and exits. A full Linux
   play-through is not what was verified.
 - **macOS and iOS.** Metal is the original backend, from upstream BotW Recompiled, and it
   stays the default on Apple. Upstream's Mac and iPhone results live in
-  [`ios/PORTING.md`](ios/PORTING.md). This fork's verified run is the Windows Vulkan path.
+  [`ios/PORTING.md`](ios/PORTING.md). This fork's testing is on the Windows Vulkan path.
   The experimental native Metal renderer is off by default
   ([`docs/native-renderer.md`](docs/native-renderer.md)).
 
 More notes are indexed in [`docs/README.md`](docs/README.md).
+
+## Contributing and bug reports
+
+Bug reports and questions go in the [Issues](https://github.com/ryderclanky/BotW-Native/issues)
+tab. Please include your GPU, driver version, and `runtime.log` from `%APPDATA%\BotWRecomp`.
 
 ## Credits and origins
 
