@@ -677,6 +677,8 @@ void LatteRenderTarget_trackUpdates()
 	}
 }
 
+void LatteRenderTarget_finishGamepadView(); // BotWRecomp: GamePad view, defined below
+
 void LatteRenderTarget_itHLESwapScanBuffer()
 {
 	performanceMonitor.cycle[performanceMonitor.cycleIndex].frameCounter++;
@@ -685,6 +687,7 @@ void LatteRenderTarget_itHLESwapScanBuffer()
 	LattePerformanceMonitor_frameEnd();
 	FrameBenchmarkHelper::FrameEnd();
 	LatteGPUState.frameCounter++;
+	LatteRenderTarget_finishGamepadView();  // BotWRecomp
 	g_renderer->SwapBuffers(true, true);
 
 	catchOpenGLError();
@@ -876,8 +879,36 @@ void LatteRenderTarget_getScreenImageArea(sint32* x, sint32* y, sint32* width, s
 }
 
 void botw_capture_hook(LatteTextureView* textureView, bool isPadView);  // BotWRecomp: --capture
+bool botw_gamepad_view_active();  // BotWRecomp: GamePad view switch, see latte_glue.cpp
 
-void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPadView)
+// BotWRecomp: GamePad view. With it on, the TV image and the GamePad image are both drawn into the
+// main window, side by side, and the overlays are drawn once on top of both when the frame is swapped.
+// The choice is made once per frame, at the first scan-out copy, so a toggle in the middle of a
+// frame cannot leave a half drawn window. With it off none of this runs.
+static bool sGamepadViewFrameLatched = false;
+static bool sGamepadViewFrameActive = false;
+static bool sGamepadViewDrawn = false; // something was already drawn into the window this frame
+
+static void LatteRenderTarget_getGamepadViewArea(bool isPadView, sint32* x, sint32* y, sint32* width, sint32* height)
+{
+	int w = 0, h = 0;
+	WindowSystem::GetWindowPhysSize(w, h);
+	w = std::max(w, 1);
+	h = std::max(h, 1);
+	// fixed layout in Wii U screen sizes: TV 1280x720, a gap, GamePad 854x480, both centered vertically
+	const double tvW = 1280.0, tvH = 720.0, padW = 854.0, padH = 480.0, gap = 32.0;
+	const double totalW = tvW + gap + padW;
+	const double scale = std::min((double)w / totalW, (double)h / tvH);
+	const double left = ((double)w - totalW * scale) / 2.0;
+	const double imageW = (isPadView ? padW : tvW) * scale;
+	const double imageH = (isPadView ? padH : tvH) * scale;
+	*x = (sint32)std::lround(left + (isPadView ? (tvW + gap) * scale : 0.0));
+	*y = (sint32)std::lround(((double)h - imageH) / 2.0);
+	*width = std::max((sint32)std::lround(imageW), 1);
+	*height = std::max((sint32)std::lround(imageH), 1);
+}
+
+static void LatteRenderTarget_copyToBackbufferImpl(LatteTextureView* textureView, bool isPadView, bool gamepadView)
 {
 	// make sure texture is updated to latest data in cache
 	LatteTexture_UpdateDataToLatest(textureView->baseTexture);
@@ -894,11 +925,18 @@ void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPa
 	sint32 imageWidth, imageHeight;
 	sint32 fullscreenWidth, fullscreenHeight;
 
-	LatteRenderTarget_getScreenImageArea(&imageX, &imageY, &imageWidth, &imageHeight, &fullscreenWidth, &fullscreenHeight, isPadView);
-
 	bool clearBackground = false;
-	if (imageWidth != fullscreenWidth || imageHeight != fullscreenHeight)
-		clearBackground = true;
+	if (gamepadView)
+	{
+		LatteRenderTarget_getGamepadViewArea(isPadView, &imageX, &imageY, &imageWidth, &imageHeight);
+		clearBackground = !sGamepadViewDrawn; // the first image of the frame clears the window
+	}
+	else
+	{
+		LatteRenderTarget_getScreenImageArea(&imageX, &imageY, &imageWidth, &imageHeight, &fullscreenWidth, &fullscreenHeight, isPadView);
+		if (imageWidth != fullscreenWidth || imageHeight != fullscreenHeight)
+			clearBackground = true;
+	}
 
 	const bool renderUpsideDown = ActiveSettings::RenderUpsideDownEnabled();
 	// force disable bicubic scaling if output resolution is equal/smaller than input resolution
@@ -977,6 +1015,21 @@ void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPa
 		}
 	}
 	cemu_assert(shader);
+	if (gamepadView)
+	{
+		// both images go to the main window's swapchain. the second one must keep the first one
+		const bool tvSRGB = LatteGPUState.tvBufferUsesSRGB;
+		if (isPadView)
+			LatteGPUState.tvBufferUsesSRGB = LatteGPUState.drcBufferUsesSRGB; // the quad takes its gamma from the TV flag
+		g_renderer->SetBackbufferBlitKeepContents(sGamepadViewDrawn);
+		g_renderer->DrawBackbufferQuad(textureView, shader, filter==LatteTextureView::MagFilter::kLinear, imageX, imageY, imageWidth, imageHeight, false, clearBackground);
+		g_renderer->SetBackbufferBlitKeepContents(false);
+		LatteGPUState.tvBufferUsesSRGB = tvSRGB;
+		sGamepadViewDrawn = true;
+		if (!isPadView)
+			g_renderer->HandleScreenshotRequest(textureView, false);
+		return; // overlays are drawn in LatteRenderTarget_finishGamepadView
+	}
 	g_renderer->DrawBackbufferQuad(textureView, shader, filter==LatteTextureView::MagFilter::kLinear, imageX, imageY, imageWidth, imageHeight, isPadView, clearBackground);
 	g_renderer->HandleScreenshotRequest(textureView, isPadView);
 	if (!g_renderer->ImguiBegin(!isPadView))
@@ -985,6 +1038,11 @@ void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPa
 	nn::erreula::render(!isPadView);
 	LatteOverlay_render(isPadView);
 	g_renderer->ImguiEnd();
+}
+
+void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPadView)
+{
+	LatteRenderTarget_copyToBackbufferImpl(textureView, isPadView, false);
 }
 
 void LatteRenderTarget_itHLECopyColorBufferToScanBuffer(MPTR colorBufferPtr, uint32 colorBufferWidth, uint32 colorBufferHeight, uint32 colorBufferSliceIndex, uint32 colorBufferFormat, uint32 colorBufferPitch, Latte::E_HWTILEMODE colorBufferTilemode, uint32 colorBufferSwizzle, uint32 renderTarget)
@@ -1022,6 +1080,20 @@ void LatteRenderTarget_itHLECopyColorBufferToScanBuffer(MPTR colorBufferPtr, uin
 
 	bool showDRC = swkbd_hasKeyboardInputHook() == false && (isDRCPrimary ^ altScreenRequested);
 
+	if (!sGamepadViewFrameLatched)
+	{
+		sGamepadViewFrameLatched = true;
+		sGamepadViewFrameActive = botw_gamepad_view_active();
+	}
+	if (sGamepadViewFrameActive)
+	{
+		if (renderTarget & RENDER_TARGET_TV)
+			LatteRenderTarget_copyToBackbufferImpl(texView, false, true);
+		if (renderTarget & RENDER_TARGET_DRC)
+			LatteRenderTarget_copyToBackbufferImpl(texView, true, true);
+		return;
+	}
+
 	if ((renderTarget & RENDER_TARGET_DRC) && g_renderer->IsPadWindowActive())
 		LatteRenderTarget_copyToBackbuffer(texView, true);
 	if (((renderTarget & RENDER_TARGET_TV) && !showDRC) || ((renderTarget & RENDER_TARGET_DRC) && showDRC))
@@ -1029,6 +1101,24 @@ void LatteRenderTarget_itHLECopyColorBufferToScanBuffer(MPTR colorBufferPtr, uin
 }
 
 
+
+// BotWRecomp: called when the frame is swapped. Draws the overlays over the side by side image.
+void LatteRenderTarget_finishGamepadView()
+{
+	if (sGamepadViewDrawn)
+	{
+		if (g_renderer->ImguiBegin(true))
+		{
+			swkbd_render(true);
+			nn::erreula::render(true);
+			LatteOverlay_render(false);
+			g_renderer->ImguiEnd();
+		}
+	}
+	sGamepadViewDrawn = false;
+	sGamepadViewFrameLatched = false;
+	sGamepadViewFrameActive = false;
+}
 
 // returns the current size of the virtual viewport (not the same as effective size, which can be influenced by texture rules)
 void LatteRenderTarget_GetCurrentVirtualViewportSize(sint32* viewportWidth, sint32* viewportHeight)

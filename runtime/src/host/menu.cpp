@@ -16,7 +16,7 @@ std::mutex g_lock;
 std::atomic<bool> g_open{false};
 int g_cursor = 0;
 
-enum RowId { kFps, kScale, kDisplay, kFilter, kGyro, kRumble, kLayout, kTouch, kShowFps, kVolume, kClose, kRows };
+enum RowId { kFps, kScale, kDisplay, kFilter, kGyro, kRumble, kLayout, kTouch, kShowFps, kVolume, kGamepadView, kClose, kRows };
 const float kScales[] = {0, 0.5f, 0.75f, 1, 1.5f, 2, 2.5f, 3};  // 0 = fit the display
 const char* kDisplays[] = {"Fit 16:9", "Stretch", "Fill (crop)"};
 const char* kFilters[] = {"Bilinear", "Bicubic", "Hermite", "Nearest"};
@@ -47,6 +47,7 @@ void step(Settings& s, int row, int dir) {
         case kTouch: s.touch = wrap(s.touch + dir, 3), s.touch_hidden = false; break;
         case kShowFps: s.show_fps = !s.show_fps; break;
         case kVolume: s.volume = std::clamp(s.volume + dir * 10, 0, 100); break;
+        case kGamepadView: s.gamepad_view = !s.gamepad_view; break;
     }
 }
 }  // namespace
@@ -150,6 +151,7 @@ View view() {
     v.rows[kShowFps] = {"FPS counter", s.show_fps ? "On" : "Off"};
     snprintf(b, sizeof b, "%d%%", s.volume);
     v.rows[kVolume] = {"Volume", b};
+    v.rows[kGamepadView] = {"GamePad screen", s.gamepad_view ? "Beside the TV (F2)" : "Off (F2)"};
     v.rows[kClose] = {"Close", "", true};
     snprintf(b, sizeof b, "Rendering at %gx now; resolution changes apply after a restart.", g_render_scale);
     v.note = b;

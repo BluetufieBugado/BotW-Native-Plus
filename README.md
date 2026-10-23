@@ -113,7 +113,7 @@ The window title is **BotW Recompiled (Windows)**. The first log line is
 `BotW Recompiled for Windows (Vulkan)`.
 
 Useful flags: `--fps 30` for the game's original pace (60 is the default), `--scale 1` for
-1280×720, `--display fit|stretch|fill`, `--no-gyro`, `--mute`. `--renderer vulkan` is the
+1280×720, `--display fit|stretch|fill`, `--no-gyro`, `--gamepad-view`, `--mute`. `--renderer vulkan` is the
 only choice on Windows. Leave `--trace` and `--trace-hle` off for a normal run.
 
 ## Controls
@@ -122,6 +122,13 @@ On this build, **E = A**, **Left Shift = B**, and **Enter = Plus**. A full keybo
 gamepad map for every GamePad button and both sticks is coming in the next update.
 
 F1 opens the settings menu. F11 toggles fullscreen.
+
+F2 shows the GamePad screen beside the TV image, and F2 again hides it. On a controller the
+same toggle is the Guide button (or the Share button on pads that have one). It is also a row
+in the settings menu, so a pad without those buttons can use L3+R3 and pick it there. It is
+off by default, and `--gamepad-view` or `--no-gamepad-view` overrides the saved choice for one run.
+While it is on, the window shows the TV (1280×720) and the GamePad (854×480) at the same scale,
+centered, and `--display` does not apply. Vulkan renderer only.
 
 ## Environment variables
 

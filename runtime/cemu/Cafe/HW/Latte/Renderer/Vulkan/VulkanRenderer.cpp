@@ -3241,7 +3241,9 @@ void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 
 	VkRenderPassBeginInfo renderPassInfo = {};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	renderPassInfo.renderPass = chainInfo.m_swapchainRenderPass;
+	// BotWRecomp: the ImGui pass loads the existing contents and is compatible with the swapchain pass
+	const bool keepContents = m_blitKeepContents && !padView && m_imguiRenderPass != VK_NULL_HANDLE;
+	renderPassInfo.renderPass = keepContents ? m_imguiRenderPass : chainInfo.m_swapchainRenderPass;
 	renderPassInfo.framebuffer = chainInfo.m_swapchainFramebuffers[chainInfo.swapchainImageIndex];
 	renderPassInfo.renderArea.offset = { 0, 0 };
 	renderPassInfo.renderArea.extent = chainInfo.getExtent();

@@ -77,6 +77,9 @@ public:
 	virtual void DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter,
 												sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight,
 												bool padView, bool clearBackground) = 0;
+	// BotWRecomp: GamePad view draws two quads into the window per frame. While set, the Vulkan renderer
+	// keeps what the previous DrawBackbufferQuad put in the backbuffer instead of discarding it.
+	void SetBackbufferBlitKeepContents(bool keep) { m_blitKeepContents = keep; }
 	virtual bool BeginFrame(bool mainWindow) = 0;
 
 	// flush control
@@ -176,6 +179,7 @@ protected:
 	RendererAPI m_rendererAPI;
 	GfxVendor m_vendor = GfxVendor::Generic;
 	std::string m_selectedDeviceName = "";
+	bool m_blitKeepContents = false;
 
 	static uint8 SRGBComponentToRGB(uint8 ci);
 	static uint8 RGBComponentToSRGB(uint8 cli);
