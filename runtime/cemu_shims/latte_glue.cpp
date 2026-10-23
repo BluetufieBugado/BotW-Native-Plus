@@ -106,6 +106,7 @@ std::atomic<uint64> g_last_flip_time{0}, g_last_vsync_time{0};
 std::atomic<uint64> g_frames{0};
 int g_capture_every = 0;
 std::atomic<uint64> g_capture_pending{0};
+std::atomic<bool> g_gamepad_view{false};  // show the GamePad screen beside the TV image
 std::string g_capture_dir;
 
 latte::HostSurface g_kind = latte::HostSurface::Cocoa;
@@ -179,6 +180,9 @@ void __GX2NotifyEvent(GX2CallbackEventType e) {
     if (g_sink) g_sink((latte::Event)(uint32)e);
 }
 }  // namespace GX2
+
+// Read by LatteRenderTarget.cpp on the GPU thread. Only the Vulkan renderer can draw the second image.
+bool botw_gamepad_view_active() { return g_gamepad_view.load() && g_vulkan; }
 
 void botw_capture_hook(LatteTextureView* view, bool isPadView) {
     uint64 f = g_capture_pending.exchange(0);
@@ -336,6 +340,8 @@ void set_output_filter(int f) {  // upscaling uses the choice; downscaling stays
     GetConfig().upscale_filter = f;
     GetConfig().downscale_filter = f == kNearestNeighborFilter ? kNearestNeighborFilter : kLinearFilter;
 }
+
+void set_gamepad_view(bool on) { g_gamepad_view = on; }
 
 void set_scanout_srgb(bool tv, bool srgb) {
     if (tv) LatteGPUState.tvBufferUsesSRGB = srgb;

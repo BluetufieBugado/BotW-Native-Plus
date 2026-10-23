@@ -154,6 +154,8 @@ int main(int argc, char** argv) {
         else if (a == "--script" && i + 1 < argc) window::set_script(argv[++i]);
         else if (a == "--trace-hle") g_trace_hle = 1;
         else if (a == "--no-gyro") opt.gyro = false;
+        else if (a == "--gamepad-view") opt.gamepad_view = true;  // GamePad screen beside the TV image
+        else if (a == "--no-gamepad-view") opt.gamepad_view = false;
         else if (a == "--trace-frames" && i + 1 < argc) sscanf(argv[++i], "%llu-%llu", &g_trace_from, &g_trace_to);
         else if (a == "--seconds" && i + 1 < argc) g_run_seconds = atoi(argv[++i]);
         else if (a == "--fps" && i + 1 < argc) opt.fps = atoi(argv[++i]) >= 60 ? 60 : 30;

@@ -22,6 +22,7 @@
 
 extern std::atomic<pthread_t> g_gpu_thread;  // cemu_shims/overlay_menu.cpp: Cemu's GPU thread
 #include "menu.h"
+#include "../settings.h"
 #include "touch.h"
 #include "../thread.h"
 
@@ -38,6 +39,14 @@ bool g_use_rumble = true;
 bool g_background = false;  // iOS app lifecycle
 int g_layout = 0;  // 0: A = right face button (Nintendo positions), 1: A = bottom face button (labels)
 std::atomic<int> g_draw_w{1280}, g_draw_h{720};
+
+// F2 / Guide button: show or hide the GamePad screen beside the TV image
+void toggle_gamepad_view() {
+    Settings s = settings::get();
+    s.gamepad_view = !s.gamepad_view;
+    settings::set(s);
+    LOG("gamepad view %s", s.gamepad_view ? "on" : "off");
+}
 
 // keyboard -> GamePad
 struct KeyMap {
@@ -155,6 +164,7 @@ void apply_input() {
             }
             if (it->kind == "quit") g_quit = true;
             else if (it->kind == "dump") threads::dump(true);  // tests: F:dump (watchdog output)
+            else if (it->kind == "gamepadview") toggle_gamepad_view();  // tests: F:gamepadview
             else if (it->kind == "menu") {  // tests: F:menu:toggle|up|down|left|right|ok
                 if (it->a == "toggle") menu::toggle();
                 else if (it->a == "up") menu::move(-1);
@@ -329,6 +339,7 @@ void run() {
                 SDL_GamepadButton confirm = g_layout == 1 ? SDL_GAMEPAD_BUTTON_SOUTH : SDL_GAMEPAD_BUTTON_EAST;
                 SDL_GamepadButton back = g_layout == 1 ? SDL_GAMEPAD_BUTTON_EAST : SDL_GAMEPAD_BUTTON_SOUTH;
                 if (b == SDL_GAMEPAD_BUTTON_TOUCHPAD || both_sticks) menu::toggle();
+                else if (b == SDL_GAMEPAD_BUTTON_GUIDE || b == SDL_GAMEPAD_BUTTON_MISC1) toggle_gamepad_view();
                 else if (menu::is_open()) {
                     if (b == SDL_GAMEPAD_BUTTON_DPAD_UP) menu::move(-1);
                     else if (b == SDL_GAMEPAD_BUTTON_DPAD_DOWN) menu::move(+1);
@@ -337,6 +348,8 @@ void run() {
                     else if (b == confirm) menu::activate();
                     else if (b == back || b == SDL_GAMEPAD_BUTTON_START) menu::close();
                 }
+            } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F2 && !e.key.repeat) {
+                toggle_gamepad_view();
             } else if (e.type == SDL_EVENT_KEY_DOWN && (e.key.key == SDLK_F1 || (menu::is_open() && !e.key.repeat))) {
                 switch (e.key.key) {
                     case SDLK_F1: menu::toggle(); break;

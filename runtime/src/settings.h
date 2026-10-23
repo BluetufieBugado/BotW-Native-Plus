@@ -18,6 +18,7 @@ struct Settings {
     bool rumble = true;
     int layout = 0;        // 0 Nintendo positions (A = right face button), 1 labels (A = bottom face button)
     bool show_fps = false;
+    bool gamepad_view = false;  // show the GamePad screen beside the TV image (F2, Guide button, or the menu)
     int volume = 100;      // percent
 #if TARGET_OS_IOS
     int touch = 1;         // on-screen controls: 0 auto (while no controller), 1 on, 2 off
