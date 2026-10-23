@@ -1,6 +1,6 @@
 # BotW Recompiled for Windows
 
-<!-- Demo clip goes here -->
+https://github.com/user-attachments/assets/1b7d6766-425b-4e4b-833a-cb3c60369226
 
 Breath of the Wild (Wii U) running on **Windows 10 and Windows 11** with Vulkan. The
 PowerPC game code is statically recompiled to C++ and runs on a Cafe OS runtime. Cemu's Latte
