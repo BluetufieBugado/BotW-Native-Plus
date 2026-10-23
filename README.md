@@ -21,7 +21,6 @@ Tested on an RTX 5060 laptop with 16 GB of RAM, from a USA v208 (1.5.0) game fol
 
 Not working or not confirmed yet:
 
-- Audio is not working yet.
 - Some effects, parts of the controller mapping, and some cutscene text are unconfirmed or
   incomplete.
 - Everything not listed above has not been checked. See [Known issues](#known-issues).
@@ -140,7 +139,6 @@ F1 opens the settings menu. F11 toggles fullscreen.
 - **First-run shaders.** Pipelines compile on first use, so the first time through a scene
   hitches. Later runs use the cache under `%APPDATA%\BotWRecomp`.
 - **A few cutscenes stay at 30 fps** on purpose. Gameplay runs at about 60 fps.
-- **Audio** is not working yet.
 - **Effects, controller mapping, cutscene text.** Some effects, parts of the controller
   mapping, and some cutscene text are unconfirmed or incomplete.
 - **Coverage.** Only the areas listed under [What works](#what-works) were checked. A long
