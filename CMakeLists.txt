@@ -32,6 +32,28 @@ if(BOTW_USE_LLD AND NOT MSVC)
   endif()
 endif()
 
+# Keep local folder names out of shipped binaries: source and build paths in __FILE__ and
+# debug info are rewritten to relative ones. Each flag is used only if the compiler accepts it.
+if(NOT MSVC)
+  include(CheckCXXCompilerFlag)
+  # GCC applies the last matching map, so the (often nested) build folder comes second.
+  foreach(_botw_map_dir "${CMAKE_SOURCE_DIR}" "${CMAKE_BINARY_DIR}")
+    file(TO_CMAKE_PATH "${_botw_map_dir}" _botw_map_dir)
+    if(_botw_map_dir STREQUAL "${CMAKE_BINARY_DIR}" AND NOT _botw_map_dir STREQUAL "${CMAKE_SOURCE_DIR}")
+      set(_botw_map_to "build")
+    else()
+      set(_botw_map_to ".")
+    endif()
+    foreach(_botw_map_kind file macro)
+      string(MAKE_C_IDENTIFIER "BOTW_HAVE_${_botw_map_kind}_PREFIX_MAP" _botw_map_var)
+      check_cxx_compiler_flag("-f${_botw_map_kind}-prefix-map=/a=b" ${_botw_map_var})
+      if(${_botw_map_var})
+        add_compile_options("-f${_botw_map_kind}-prefix-map=${_botw_map_dir}=${_botw_map_to}")
+      endif()
+    endforeach()
+  endforeach()
+endif()
+
 if(APPLE)
   enable_language(OBJC)
   enable_language(OBJCXX)
@@ -259,8 +281,13 @@ endif()
 # SDL_AddGamepadMappingsFromFile reads it at startup. The compile path is the
 # fallback when the process is not started from the build directory.
 set(_botw_controller_db "${CMAKE_SOURCE_DIR}/runtime/gamecontrollerdb.txt")
-file(TO_CMAKE_PATH "${_botw_controller_db}" _botw_controller_db_fwd)
-target_compile_definitions(BotWRecomp PRIVATE "BOTW_GAMECONTROLLER_DB=\"${_botw_controller_db_fwd}\"")
+# The compiled-in fallback path is for development runs only, so release builds do not carry
+# the local source folder.
+option(BOTW_EMBED_SOURCE_PATHS "Compile in the source path of gamecontrollerdb.txt as a fallback" OFF)
+if(BOTW_EMBED_SOURCE_PATHS)
+  file(TO_CMAKE_PATH "${_botw_controller_db}" _botw_controller_db_fwd)
+  target_compile_definitions(BotWRecomp PRIVATE "BOTW_GAMECONTROLLER_DB=\"${_botw_controller_db_fwd}\"")
+endif()
 add_custom_command(TARGET BotWRecomp POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${_botw_controller_db}" "$<TARGET_FILE_DIR:BotWRecomp>/gamecontrollerdb.txt"
@@ -407,3 +434,29 @@ if(BOTW_BUILD_TESTS)
   enable_testing()
   add_test(NAME mods COMMAND BotWModTests)
 endif()
+
+# Release package: `cmake --build <build> --target botw_package` (or
+# `cmake --install <build> --prefix <dir> --strip`) copies the shipped programs, stripped of
+# debug info, plus gamecontrollerdb.txt and the non-system DLLs they need, into one folder.
+set(BOTW_PACKAGE_DIR "${CMAKE_BINARY_DIR}/package" CACHE PATH "Output folder for the botw_package target")
+set(_botw_ship BotWRecomp)
+if(WIN32)
+  list(APPEND _botw_ship BotWLauncher BotWLauncherClassic BotWNativeSetup)
+endif()
+if(WIN32 OR (UNIX AND NOT APPLE))
+  install(TARGETS ${_botw_ship}
+    RUNTIME_DEPENDENCIES
+      PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-" "^vulkan-1" "^libvulkan"
+      POST_EXCLUDE_REGEXES ".*[Ss]ystem32.*" "^/lib" "^/usr/lib"
+      DIRECTORIES $ENV{PATH}
+    RUNTIME DESTINATION .
+    LIBRARY DESTINATION .)
+else()
+  install(TARGETS ${_botw_ship} RUNTIME DESTINATION . BUNDLE DESTINATION .)
+endif()
+install(FILES "${CMAKE_SOURCE_DIR}/runtime/gamecontrollerdb.txt" DESTINATION .)
+add_custom_target(botw_package
+  COMMAND ${CMAKE_COMMAND} --install "${CMAKE_BINARY_DIR}" --prefix "${BOTW_PACKAGE_DIR}" --strip
+  DEPENDS ${_botw_ship}
+  COMMENT "Packaging stripped release into ${BOTW_PACKAGE_DIR}"
+  VERBATIM)
