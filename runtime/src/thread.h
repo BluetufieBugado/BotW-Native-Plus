@@ -32,6 +32,7 @@ struct GuestThread {
     bool started = false, exited = false;
     bool is_main = false;
     pthread_t host_tid{};  // for watchdog stack dumps
+    void* win_handle = nullptr;  // duplicated Win32 thread handle for sampling
     uint32_t exit_value = 0;
     uint32_t entry = 0;
     int core = 1;
@@ -91,6 +92,7 @@ void sample_host(pthread_t th, const char* label);
 // ucontext_t* captured elsewhere (a fault, a suspended thread).
 void host_stack_log(const char* label, void* host_context = nullptr);
 std::vector<std::pair<pthread_t, std::string>> snapshot_live();
+std::vector<std::pair<void*, std::string>> snapshot_live_handles();
 
 // Main-thread blocked time per wait kind (frame pacing analysis); report() returns and resets it.
 void note_main_wait(const char* kind, uint64_t ns);

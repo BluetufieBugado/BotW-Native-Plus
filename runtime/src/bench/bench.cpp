@@ -55,8 +55,7 @@ double elapsed_s(Clock::time_point t0) {
 }
 
 #if defined(_WIN32)
-void sample_one(pthread_t th, const std::string& name, uintptr_t base, uintptr_t end) {
-    HANDLE h = (HANDLE)pthread_gethandle(th);
+void sample_handle(HANDLE h, const std::string& name, uintptr_t base, uintptr_t end) {
     if (!h || GetThreadId(h) == GetCurrentThreadId()) return;
     if (SuspendThread(h) == (DWORD)-1) return;
     CONTEXT ctx{};
@@ -98,13 +97,13 @@ void profiler_loop() {
             end = base + nt->OptionalHeader.SizeOfImage;
         }
     }
-    std::vector<std::pair<pthread_t, std::string>> live;
+    std::vector<std::pair<void*, std::string>> live;
     uint64_t iter = 0;
     while (g_prof_run.load(std::memory_order_relaxed)) {
-        if ((iter++ % 50) == 0) live = threads::snapshot_live();
+        if ((iter++ % 50) == 0) live = threads::snapshot_live_handles();
         pthread_t gpu = g_gpu_thread.load(std::memory_order_relaxed);
-        if (gpu) sample_one(gpu, "LatteThread", base, end);
-        for (auto& [th, name] : live) sample_one(th, name, base, end);
+        if (gpu) sample_handle((HANDLE)pthread_gethandle(gpu), "LatteThread", base, end);
+        for (auto& [h, name] : live) sample_handle((HANDLE)h, name, base, end);
         g_prof_ticks++;
         Sleep(2);
     }
