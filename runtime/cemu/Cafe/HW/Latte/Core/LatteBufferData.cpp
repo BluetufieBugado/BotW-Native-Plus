@@ -159,8 +159,6 @@ bool LatteBufferCache_LoadRemappedUniforms(LatteDecompilerShader* shader, float*
 bool LatteBufferCache_syncGPUUniformBuffers(LatteDecompilerShader* shader, const uint32 uniformBufferRegOffset, LatteConst::ShaderType shaderType, uint32 bufferDirtyMask)
 {
 	cemu_assert_debug(shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK);
-	if (bufferDirtyMask == 0)
-		return false;
 	bool hasChange = false;
 	for(const auto& buf : shader->list_quickBufferList)
 	{

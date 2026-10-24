@@ -903,25 +903,6 @@ private:
 std::unique_ptr<VHeap> g_gpuBufferHeap = nullptr;
 std::vector<uint8> s_pageUploadBuffer;
 std::vector<class BufferCacheNode*> s_allCacheNodes;
-static class BufferCacheNode* s_lastRangeNode = nullptr;
-static constexpr uint32 NUM_BUFFER_CACHE_PAGES = (uint32)(0x100000000ULL / CACHE_PAGE_SIZE);
-static uint64 s_cachedBufferPages[NUM_BUFFER_CACHE_PAGES / 64]{};
-
-static inline void markBufferCachePages(MPTR begin, MPTR end)
-{
-	uint32 firstPage = begin / CACHE_PAGE_SIZE;
-	uint32 lastPage = end / CACHE_PAGE_SIZE;
-	for (uint32 p = firstPage; p < lastPage; p++)
-		s_cachedBufferPages[p >> 6] |= (1ULL << (p & 63));
-}
-
-static inline void unmarkBufferCachePages(MPTR begin, MPTR end)
-{
-	uint32 firstPage = begin / CACHE_PAGE_SIZE;
-	uint32 lastPage = end / CACHE_PAGE_SIZE;
-	for (uint32 p = firstPage; p < lastPage; p++)
-		s_cachedBufferPages[p >> 6] &= ~(1ULL << (p & 63));
-}
 
 void LatteBufferCache_removeSingleNodeFromTree(BufferCacheNode* node);
 
@@ -933,9 +914,6 @@ class BufferCacheNode
 public:
 	~BufferCacheNode()
 	{
-		unmarkBufferCachePages(m_rangeBegin, m_rangeEnd);
-		if (s_lastRangeNode == this)
-			s_lastRangeNode = nullptr;
 		if (m_hasCacheAlloc)
 			g_deallocateQueue.emplace_back(m_cacheOffset); // release after current drawcall
 		// remove from array
@@ -1205,7 +1183,6 @@ private:
 
 	BufferCacheNode(MPTR rangeBegin, MPTR rangeEnd): m_rangeBegin(rangeBegin), m_rangeEnd(rangeEnd)
 	{
-		markBufferCachePages(rangeBegin, rangeEnd);
 		flagInUse();
 		cemu_assert_debug(rangeBegin < rangeEnd);
 		size_t numPages = getPageCountFromRangeAligned(rangeBegin, rangeEnd);
@@ -1283,10 +1260,19 @@ private:
 		uint32 uploadRangeBegin = m_rangeBegin + firstPage * CACHE_PAGE_SIZE;
 		uint32 uploadRangeEnd = m_rangeBegin + lastPagePlusOne * CACHE_PAGE_SIZE;
 		cemu_assert_debug(uploadRangeEnd > uploadRangeBegin);
-		uint32 uploadSize = uploadRangeEnd - uploadRangeBegin;
+		// make sure uploaded pages and hashes match
+		uint32 numPages = lastPagePlusOne - firstPage;
+		if (s_pageUploadBuffer.size() < (numPages * CACHE_PAGE_SIZE))
+			s_pageUploadBuffer.resize(numPages * CACHE_PAGE_SIZE);
+		// todo - improve performance by merging memcpy + hashPage() ?
 		uint8* ram = memory_getPointerFromPhysicalOffset(uploadRangeBegin);
-		memory_commit_span(ram, uploadSize);
-		g_renderer->bufferCache_upload(ram, uploadSize, getBufferOffset(uploadRangeBegin));
+		memory_commit_span(ram, numPages * CACHE_PAGE_SIZE);
+		memcpy(s_pageUploadBuffer.data(), ram, numPages * CACHE_PAGE_SIZE);
+		for (uint32 i = 0; i < numPages; i++)
+		{
+			m_pageInfo[firstPage + i].hash = hashPage(s_pageUploadBuffer.data() + i * CACHE_PAGE_SIZE);
+		}
+		g_renderer->bufferCache_upload(s_pageUploadBuffer.data(), uploadRangeEnd - uploadRangeBegin, getBufferOffset(uploadRangeBegin));
 	}
 
 	// upload only non-streamout data of a single page
@@ -1546,25 +1532,17 @@ std::vector<uint32> BufferCacheNode::g_deallocateQueue;
 
 void LatteBufferCache_removeSingleNodeFromTree(BufferCacheNode* node)
 {
-	if (s_lastRangeNode == node)
-		s_lastRangeNode = nullptr;
 	g_gpuBufferCache.RemoveRange(node->GetRangeBegin(), node->GetRangeEnd());
 }
 
 BufferCacheNode* LatteBufferCache_reserveRange(MPTR physAddress, uint32 size)
 {
-	if (s_lastRangeNode && physAddress >= s_lastRangeNode->GetRangeBegin() && (physAddress + size) <= s_lastRangeNode->GetRangeEnd())
-		return s_lastRangeNode;
-
 	MPTR rangeStart = physAddress - (physAddress % CACHE_PAGE_SIZE);
 	MPTR rangeEnd = (physAddress + size + CACHE_PAGE_SIZE_M1) & ~CACHE_PAGE_SIZE_M1;
 
 	BufferCacheNode* range = g_gpuBufferCache.GetRange(physAddress);
 	if (range && physAddress >= range->GetRangeBegin() && (physAddress+size) <= range->GetRangeEnd())
-	{
-		s_lastRangeNode = range;
 		return range;
-	}
 	// no containing range found, we need to create a range and potentially merge with any overlapping ranges
 	g_gpuBufferCache.GetOverlappingRanges(rangeStart, rangeEnd, s_gpuCacheQueryResult);
 	if (s_gpuCacheQueryResult.empty())
@@ -1572,7 +1550,6 @@ BufferCacheNode* LatteBufferCache_reserveRange(MPTR physAddress, uint32 size)
 		// no overlaps we can just create a new blank range
 		BufferCacheNode* newRange = BufferCacheNode::Create(rangeStart, rangeEnd, s_gpuCacheQueryResult);
 		g_gpuBufferCache.AddRange(rangeStart, rangeEnd, newRange);
-		s_lastRangeNode = newRange;
 		return newRange;
 	}
 	else
@@ -1584,7 +1561,6 @@ BufferCacheNode* LatteBufferCache_reserveRange(MPTR physAddress, uint32 size)
 			g_gpuBufferCache.RemoveRange(it->GetRangeBegin(), it->GetRangeEnd()); // remove from interval tree, BufferCacheNode::Create below will delete the range objects
 		BufferCacheNode* newRange = BufferCacheNode::Create(mergedRangeStart, mergedRangeEnd, s_gpuCacheQueryResult);
 		g_gpuBufferCache.AddRange(mergedRangeStart, mergedRangeEnd, newRange);
-		s_lastRangeNode = newRange;
 		return newRange;
 	}
 }
@@ -1634,16 +1610,7 @@ void LatteBufferCache_invalidate(MPTR physAddress, uint32 size)
 void LatteBufferCache_invalidatePage(MPTR physAddress)
 {
 	cemu_assert_debug((physAddress & CACHE_PAGE_SIZE_M1) == 0);
-	uint32 page = physAddress / CACHE_PAGE_SIZE;
-	if ((s_cachedBufferPages[page >> 6] & (1ULL << (page & 63))) == 0)
-		return;
-	BufferCacheNode* node = s_lastRangeNode;
-	if (!node || physAddress < node->GetRangeBegin() || physAddress >= node->GetRangeEnd())
-	{
-		node = g_gpuBufferCache.GetRange(physAddress);
-		if (node)
-			s_lastRangeNode = node;
-	}
+	BufferCacheNode* node = g_gpuBufferCache.GetRange(physAddress);
 	if (node)
 	{
 		cemu_assert_debug(physAddress >= node->GetRangeBegin() && physAddress < node->GetRangeEnd());
@@ -1675,53 +1642,60 @@ void LatteBufferCache_getStats(uint32& heapSize, uint32& allocationSize, uint32&
 
 class SparseBitset
 {
-	static inline constexpr uint32 NUM_PAGES = (uint32)(0x100000000ULL / CACHE_PAGE_SIZE);
+	static inline constexpr size_t TABLE_MASK = 0xFF;
 
 public:
-	SparseBitset()
-	{
-		m_dirtyPages.reserve(4096);
-	}
-
 	bool Empty() const
 	{
-		return m_dirtyPages.empty();
+		return m_numNonEmptyVectors == 0;
 	}
 
-	FORCE_INLINE void Set(uint32 index)
+	void Set(uint32 index)
 	{
-		if (index >= NUM_PAGES)
+		auto& v = m_bits[index & TABLE_MASK];
+		if (std::find(v.cbegin(), v.cend(), index) != v.end())
 			return;
-		uint64 mask = 1ULL << (index & 63);
-		uint64& word = m_pageBits[index >> 6];
-		if ((word & mask) == 0)
+		if (v.empty())
 		{
-			word |= mask;
-			m_dirtyPages.emplace_back(index);
+			m_nonEmptyVectors[m_numNonEmptyVectors] = &v;
+			m_numNonEmptyVectors++;
 		}
+		v.emplace_back(index);
 	}
 
 	template<typename TFunc>
 	void ForAllAndClear(TFunc callbackFunc)
 	{
-		for (uint32 index : m_dirtyPages)
+		auto vCurrent = m_nonEmptyVectors + 0;
+		auto vEnd = m_nonEmptyVectors + m_numNonEmptyVectors;
+		while (vCurrent < vEnd)
 		{
-			m_pageBits[index >> 6] = 0;
-			callbackFunc(index);
+			std::vector<uint32>* vec = *vCurrent;
+			vCurrent++;
+			for (const auto& it : *vec)
+				callbackFunc(it);
+			vec->clear();
 		}
-		m_dirtyPages.clear();
+		m_numNonEmptyVectors = 0;
 	}
 
 	void Clear()
 	{
-		for (uint32 index : m_dirtyPages)
-			m_pageBits[index >> 6] = 0;
-		m_dirtyPages.clear();
+		auto vCurrent = m_nonEmptyVectors + 0;
+		auto vEnd = m_nonEmptyVectors + m_numNonEmptyVectors;
+		while (vCurrent < vEnd)
+		{
+			std::vector<uint32>* vec = *vCurrent;
+			vCurrent++;
+			vec->clear();
+		}
+		m_numNonEmptyVectors = 0;
 	}
 
 private:
-	uint64 m_pageBits[NUM_PAGES / 64]{};
-	std::vector<uint32> m_dirtyPages;
+	std::vector<uint32> m_bits[TABLE_MASK + 1];
+	std::vector<uint32>* m_nonEmptyVectors[TABLE_MASK + 1];
+	size_t m_numNonEmptyVectors{ 0 };
 };
 
 FSpinlock g_spinlockDCFlushQueue;
