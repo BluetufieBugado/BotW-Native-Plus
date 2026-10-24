@@ -11,6 +11,7 @@
 #include "../src/host/menu.h"
 #include "../src/host/touch.h"
 #include "../src/host/touch_draw.h"
+#include "../src/bench/bench.h"
 #include "../src/settings.h"
 #include "Cafe/HW/Latte/Core/LatteOverlay.h"
 #include "title_diag.h"
@@ -32,6 +33,7 @@ void LatteOverlay_updateStats(double fps, sint32 drawcalls, sint32 fastDrawcalls
     g_gpu_thread = pthread_self();  // stats are updated on the GPU thread
     g_fps = (float)fps;
     g_draws = drawcalls;
+    bench::on_stats(drawcalls);
     static int n = 0;
     if (fps > 0 && (n++ % 5) == 0)
         log_write("[gpu] %.1f fps, %d draws/frame (%d fast); main thread waits: %s", fps, drawcalls, fastDrawcalls,

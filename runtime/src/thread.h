@@ -10,6 +10,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "ppc.h"
 
@@ -88,6 +90,7 @@ void sample_host(pthread_t th, const char* label);
 // Log the host stack of the caller, or of host_context when it is a Windows CONTEXT* / POSIX
 // ucontext_t* captured elsewhere (a fault, a suspended thread).
 void host_stack_log(const char* label, void* host_context = nullptr);
+std::vector<std::pair<pthread_t, std::string>> snapshot_live();
 
 // Main-thread blocked time per wait kind (frame pacing analysis); report() returns and resets it.
 void note_main_wait(const char* kind, uint64_t ns);

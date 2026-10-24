@@ -5,6 +5,7 @@
 #include <mutex>
 #include <thread>
 
+#include "../bench/bench.h"
 #include "../compat/cemu_export.h"
 #include "../os.h"
 #include "../thread.h"
@@ -266,6 +267,7 @@ void GX2SwapScanBuffers() {
     latte::add_flip_request();
     gx2WriteGather_submit(pm4HeaderType3(IT_HLE_REQUEST_SWAP_BUFFERS, 1), 0u, pm4HeaderType3(IT_HLE_TRIGGER_SCANBUFFER_SWAP, 1), 0u);
     g_game_frames++;
+    bench::on_swap();
     while ((sint32)(latte::flip_requests() - latte::flips_executed()) > 5) {
         threads::WaitMark w("flip (swap backlog)", 0);
         threads::CoreHandoff handoff;
