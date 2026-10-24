@@ -9,7 +9,7 @@ not a full-game release.
 
 ## What works
 
-Tested on an RTX 5060 laptop with 16 GB of RAM, from a USA v208 (1.5.0) game folder, at about
+Tested on a recent NVIDIA laptop GPU, from a USA v208 (1.5.0) game folder, at about
 60 fps:
 
 - the opening
@@ -34,8 +34,8 @@ Not working or not confirmed yet:
 
 ## Requirements
 
-- Windows 10 or Windows 11, and a GPU with a Vulkan 1.1 driver. The verified machine is an
-  RTX 5060 laptop.
+- Windows 10 or Windows 11, and a GPU with a Vulkan 1.1 driver. The verified machine has
+  a recent NVIDIA laptop GPU.
 - [MSYS2](https://www.msys2.org/) with the **UCRT64** environment. The Cafe runtime uses
   pthreads, so the build is MinGW gcc. MSVC and clang-cl are not supported.
 - Your own legally obtained **Breath of the Wild for Wii U, USA, with update v208 (1.5.0)**,
