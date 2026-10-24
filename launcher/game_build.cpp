@@ -78,9 +78,13 @@ int auto_jobs(int* cores_out, double* ram_gb_out) {
     MEMORYSTATUSEX ms{sizeof ms};
     GlobalMemoryStatusEx(&ms);
     double gb = ms.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
-    // Measured: one compiler process on the generated game code peaks around 0.5 GB, so allow
-    // 0.75 GB per job and keep 2 GB for the rest of the system.
-    int by_ram = std::max(1, (int)((gb - 2.0) / 0.75));
+    double avail = ms.ullAvailPhys / (1024.0 * 1024.0 * 1024.0);
+    // One compiler process on the generated game code peaks around 0.6-0.7 GB. A full -j16 build on a
+    // 16 GB PC pushed it into heavy paging, so leave 4 GB of the total for the system and also stay
+    // inside the memory that is actually free right now (other apps keep running during the build).
+    int by_total = (int)((gb - 4.0) / 1.0);
+    int by_free = (int)((avail - 1.5) / 0.75);
+    int by_ram = std::max(1, std::min(by_total, by_free));
     if (cores_out) *cores_out = cores;
     if (ram_gb_out) *ram_gb_out = gb;
     return std::clamp(std::min(cores, by_ram), 1, 64);
