@@ -317,8 +317,17 @@ if(WIN32)
   set(_botw_manifest "${CMAKE_SOURCE_DIR}/launcher/app.manifest")
   file(TO_CMAKE_PATH "${_botw_manifest}" _botw_manifest_cmake)
   file(WRITE "${CMAKE_BINARY_DIR}/botw_launcher_manifest.rc" "1 24 \"${_botw_manifest_cmake}\"\n")
+  # BotWLauncher: guided first-run setup, then Play / Mods / Settings.
   add_executable(BotWLauncher WIN32
     launcher/main.cpp
+    launcher/game_info.cpp
+    launcher/mods.cpp
+    launcher/setup_wizard.cpp
+    launcher/unzip.cpp
+    "${CMAKE_BINARY_DIR}/botw_launcher_manifest.rc")
+  # BotWLauncherClassic: the full launcher with controls, saves and the Setup Assistant.
+  add_executable(BotWLauncherClassic WIN32
+    launcher/classic_main.cpp
     launcher/game_info.cpp
     launcher/mods.cpp
     launcher/save_import.cpp
@@ -327,19 +336,21 @@ if(WIN32)
     launcher/unzip.cpp
     runtime/src/input/controls_file.cpp
     "${CMAKE_BINARY_DIR}/botw_launcher_manifest.rc")
-  target_include_directories(BotWLauncher PRIVATE launcher runtime/src)
-  target_compile_definitions(BotWLauncher PRIVATE SDL_MAIN_HANDLED UNICODE _UNICODE)
-  target_compile_options(BotWLauncher PRIVATE -O2 -Wall -Wno-unused-function -Wno-unused-variable -fwrapv)
-  if(TARGET SDL3::SDL3-shared)
-    target_link_libraries(BotWLauncher PRIVATE SDL3::SDL3-shared)
-  else()
-    target_link_libraries(BotWLauncher PRIVATE SDL3::SDL3)
-  endif()
-  target_link_libraries(BotWLauncher PRIVATE ZLIB::ZLIB comctl32 comdlg32 shell32 ole32 uuid uxtheme dwmapi gdiplus)
-  if(MINGW)
-    # GUI subsystem, but the entry point stays main() so SDL_main is not required.
-    target_link_options(BotWLauncher PRIVATE "-Wl,-e,mainCRTStartup")
-  endif()
+  foreach(_tgt BotWLauncher BotWLauncherClassic)
+    target_include_directories(${_tgt} PRIVATE launcher runtime/src)
+    target_compile_definitions(${_tgt} PRIVATE SDL_MAIN_HANDLED UNICODE _UNICODE)
+    target_compile_options(${_tgt} PRIVATE -O2 -Wall -Wno-unused-function -Wno-unused-variable -fwrapv)
+    if(TARGET SDL3::SDL3-shared)
+      target_link_libraries(${_tgt} PRIVATE SDL3::SDL3-shared)
+    else()
+      target_link_libraries(${_tgt} PRIVATE SDL3::SDL3)
+    endif()
+    target_link_libraries(${_tgt} PRIVATE ZLIB::ZLIB comctl32 comdlg32 shell32 ole32 uuid uxtheme dwmapi gdiplus)
+    if(MINGW)
+      # GUI subsystem, but the entry point stays main() so SDL_main is not required.
+      target_link_options(${_tgt} PRIVATE "-Wl,-e,mainCRTStartup")
+    endif()
+  endforeach()
   file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/BotWLauncher.cmd" CONTENT
     "@echo off\r\nset \"PATH=C:\\msys64\\ucrt64\\bin;%PATH%\"\r\nstart \"\" \"%~dp0BotWLauncher.exe\"\r\n")
   message(STATUS "BotWLauncher: Windows launcher (BotWLauncher.exe)")
