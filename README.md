@@ -112,6 +112,9 @@ commit. The log line is `guest commit charge 1451 MB (not resident)`.
 The window title is **BotW Recompiled (Windows)**. The first log line is
 `BotW Recompiled for Windows (Vulkan)`.
 
+Mods: put file replacement mods in `%APPDATA%\BotWRecomp\mods` and enable them in `mods.ini`.
+`--no-mods` skips them for one run. See [`docs/mods.md`](docs/mods.md). This is untested in game so far.
+
 Useful flags: `--fps 30` for the game's original pace (60 is the default), `--scale 1` for
 1280×720, `--display fit|stretch|fill`, `--no-gyro`, `--gamepad-view`, `--mute`. `--renderer vulkan` is the
 only choice on Windows. Leave `--trace` and `--trace-hle` off for a normal run.
