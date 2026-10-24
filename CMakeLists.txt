@@ -127,7 +127,7 @@ else()
 endif()
 file(GLOB BIG_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/generated/big_*.cpp)
 file(GLOB HUGE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/generated/huge_*.cpp)
-if(BIG_SOURCES AND APPLE)
+if(BIG_SOURCES)
   set_source_files_properties(${BIG_SOURCES} PROPERTIES COMPILE_OPTIONS "-O1")
 endif()
 if(HUGE_SOURCES)
@@ -301,7 +301,7 @@ if(WIN32)
   # `#pragma comment(lib, "ntdll.lib")` is MSVC-only; gcc ignores it, so this
   # link is what resolves the symbol. The Windows CI job links SystemInfoWin.cpp
   # into this executable and fails if ntdll is dropped.
-  target_link_libraries(BotWRecomp PRIVATE psapi ntdll)
+  target_link_libraries(BotWRecomp PRIVATE psapi ntdll mfplat mfuuid ole32)
 endif()
 if(APPLE)
   target_link_libraries(BotWRecomp PRIVATE

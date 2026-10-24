@@ -26,48 +26,32 @@ struct
 		uint32 outputCount;
 		Renderer::IndexAllocation indexAllocation;
 	};
-	std::array<CacheEntry, 64> entry;
-	uint64 activeMask{0};
+	std::array<CacheEntry, 8> entry;
 	uint64 currentUsageCounter{0};
-	uint32 lastHitIndex{0};
 }LatteIndexCache{};
 
 void LatteIndices_invalidate(const void* memPtr, uint32 size)
 {
-	uint64 mask = LatteIndexCache.activeMask;
-	while (mask)
+	for(auto& entry : LatteIndexCache.entry)
 	{
-		uint32 idx = (uint32)std::countr_zero(mask);
-		mask &= mask - 1;
-		auto& entry = LatteIndexCache.entry[idx];
-		if (entry.lastPtr >= memPtr && (entry.lastPtr < ((const uint8*)memPtr + size)))
+		if (entry.lastPtr >= memPtr && (entry.lastPtr < ((uint8*)memPtr + size)) )
 		{
-			if (entry.lastPtr != nullptr)
+			if(entry.lastPtr != nullptr)
 				g_renderer->indexData_releaseIndexMemory(entry.indexAllocation);
 			entry.lastPtr = nullptr;
 			entry.lastCount = 0;
-			entry.lastUsed = 0;
-			LatteIndexCache.activeMask &= ~(1ULL << idx);
 		}
 	}
 }
 
 void LatteIndices_invalidateAll()
 {
-	uint64 mask = LatteIndexCache.activeMask;
-	if (!mask)
-		return;
-	LatteIndexCache.activeMask = 0;
-	while (mask)
+	for(auto& entry : LatteIndexCache.entry)
 	{
-		uint32 idx = (uint32)std::countr_zero(mask);
-		mask &= mask - 1;
-		auto& entry = LatteIndexCache.entry[idx];
 		if (entry.lastPtr != nullptr)
 			g_renderer->indexData_releaseIndexMemory(entry.indexAllocation);
 		entry.lastPtr = nullptr;
 		entry.lastCount = 0;
-		entry.lastUsed = 0;
 	}
 }
 
@@ -670,33 +654,18 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	// [ ] better cache implementation, allow to cache across frames
 
 	// reuse from cache if data didn't change
+	auto cacheEntry = std::find_if(LatteIndexCache.entry.begin(), LatteIndexCache.entry.end(), [indexData, count, primitiveMode, indexType](const auto& entry)
 	{
-		auto& mru = LatteIndexCache.entry[LatteIndexCache.lastHitIndex];
-		if (mru.lastPtr == indexData && mru.lastCount == count && mru.lastPrimitiveMode == primitiveMode && mru.lastIndexType == indexType)
-		{
-			indexMax = mru.indexMax;
-			renderIndexType = mru.renderIndexType;
-			outputCount = mru.outputCount;
-			indexAllocation = mru.indexAllocation;
-			mru.lastUsed = LatteIndices_GetNextUsageIndex();
-			return;
-		}
-	}
-	const uint32 setIdx = (uint32)(((uintptr_t)indexData >> 5) ^ ((uintptr_t)indexData >> 13) ^ count ^ ((uint32)primitiveMode << 2)) & 15u;
-	const uint32 setBase = setIdx * 4;
-	for (uint32 w = 0; w < 4; ++w)
+		return entry.lastPtr == indexData && entry.lastCount == count && entry.lastPrimitiveMode == primitiveMode && entry.lastIndexType == indexType;
+	});
+	if (cacheEntry != LatteIndexCache.entry.end())
 	{
-		auto& e = LatteIndexCache.entry[setBase + w];
-		if (e.lastPtr == indexData && e.lastCount == count && e.lastPrimitiveMode == primitiveMode && e.lastIndexType == indexType)
-		{
-			LatteIndexCache.lastHitIndex = setBase + w;
-			indexMax = e.indexMax;
-			renderIndexType = e.renderIndexType;
-			outputCount = e.outputCount;
-			indexAllocation = e.indexAllocation;
-			e.lastUsed = LatteIndices_GetNextUsageIndex();
-			return;
-		}
+		indexMax = cacheEntry->indexMax;
+		renderIndexType = cacheEntry->renderIndexType;
+		outputCount = cacheEntry->outputCount;
+		indexAllocation = cacheEntry->indexAllocation;
+		cacheEntry->lastUsed = LatteIndices_GetNextUsageIndex();
+		return;
 	}
 
 	outputCount = 0;
@@ -876,18 +845,11 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	}
 	g_renderer->indexData_uploadIndexMemory(indexAllocation);
 	performanceMonitor.cycle[performanceMonitor.cycleIndex].indexDataUploaded += indexOutputSize;
-	// get least recently used cache entry within the 4-way set
-	uint32 victimIdx = setBase;
-	uint64 minUsed = LatteIndexCache.entry[setBase].lastUsed;
-	for (uint32 w = 1; w < 4; ++w)
+	// get least recently used cache entry
+	auto lruEntry = std::min_element(LatteIndexCache.entry.begin(), LatteIndexCache.entry.end(), [](const auto& a, const auto& b)
 	{
-		if (LatteIndexCache.entry[setBase + w].lastUsed < minUsed)
-		{
-			minUsed = LatteIndexCache.entry[setBase + w].lastUsed;
-			victimIdx = setBase + w;
-		}
-	}
-	auto* lruEntry = &LatteIndexCache.entry[victimIdx];
+		return a.lastUsed < b.lastUsed;
+	});
 	// invalidate previous allocation
 	if(lruEntry->lastPtr != nullptr)
 		g_renderer->indexData_releaseIndexMemory(lruEntry->indexAllocation);
@@ -901,6 +863,4 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	lruEntry->outputCount = outputCount;
 	lruEntry->indexAllocation = indexAllocation;
 	lruEntry->lastUsed = LatteIndices_GetNextUsageIndex();
-	LatteIndexCache.activeMask |= (1ULL << victimIdx);
-	LatteIndexCache.lastHitIndex = victimIdx;
 }

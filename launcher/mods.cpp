@@ -1,3 +1,9 @@
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include "mods.h"
 #include "unzip.h"
 
@@ -143,6 +149,7 @@ bool is_shader_filename(std::string_view fname) {
 bool looks_like_mod_root(const std::filesystem::path& dir) {
     std::error_code ec;
     if (std::filesystem::is_regular_file(dir / "rules.txt", ec)) return true;
+    if (std::filesystem::is_regular_file(dir / "info.json", ec)) return true;
     if (std::filesystem::is_directory(dir / "content", ec)) return true;
     if (std::filesystem::is_directory(dir / "aoc", ec)) return true;
     if (std::filesystem::is_directory(dir / "shaders", ec)) return true;
@@ -533,6 +540,90 @@ bool save(const std::filesystem::path& root, const State& st, bool write_order, 
     return true;
 }
 
+
+std::string extract_json_string(const std::string& json, const std::string& key) {
+    std::string pat = "\"" + key + "\"";
+    size_t pos = json.find(pat);
+    if (pos == std::string::npos) return {};
+    pos = json.find(':', pos + pat.size());
+    if (pos == std::string::npos) return {};
+    pos = json.find('"', pos + 1);
+    if (pos == std::string::npos) return {};
+    ++pos;
+    std::string out;
+    while (pos < json.size()) {
+        char c = json[pos++];
+        if (c == '\\' && pos < json.size()) {
+            char esc = json[pos++];
+            if (esc == 'n') out.push_back('\n');
+            else if (esc == 'r') {}
+            else if (esc == 't') out.push_back(' ');
+            else out.push_back(esc);
+        } else if (c == '"') {
+            break;
+        } else {
+            out.push_back(c);
+        }
+    }
+    return trim(out);
+}
+
+void ensure_bnp_rules(const std::filesystem::path& mod_dir, std::string* out_display_name) {
+    std::error_code ec;
+    std::filesystem::path info_p = mod_dir / "info.json";
+    if (!std::filesystem::is_regular_file(info_p, ec)) return;
+    std::string jtxt;
+    if (!read_text(info_p, jtxt)) return;
+    std::string name = extract_json_string(jtxt, "name");
+    std::string desc = extract_json_string(jtxt, "desc");
+    std::string ver  = extract_json_string(jtxt, "version");
+    if (name.empty()) return;
+    if (out_display_name) {
+        *out_display_name = (!ver.empty() && name.find(ver) == std::string::npos) ? (name + " " + ver) : name;
+    }
+    std::filesystem::path rules_p = mod_dir / "rules.txt";
+    if (std::filesystem::is_regular_file(rules_p, ec)) return;
+    std::string desc_line = desc;
+    size_t nl = desc_line.find('\n');
+    if (nl != std::string::npos) desc_line = trim(desc_line.substr(0, nl));
+    if (desc_line.empty()) desc_line = name;
+    std::ofstream out(rules_p, std::ios::binary | std::ios::trunc);
+    if (!out) return;
+    out << "[Definition]\r\n"
+        << "titleIds = 00050000101C9300,00050000101C9400,00050000101C9500\r\n"
+        << "name = " << name << "\r\n"
+        << "path = \"The Legend of Zelda: Breath of the Wild/Mods/" << name << "\"\r\n"
+        << "description = " << desc_line << "\r\n"
+        << "version = 7\r\n";
+}
+
+bool extract_archive_to(const std::filesystem::path& archive_path, const std::filesystem::path& dest, std::string& err) {
+    std::string zip_err;
+    if (unzip_to(archive_path, dest, zip_err)) return true;
+#ifdef _WIN32
+    std::error_code ec;
+    std::filesystem::create_directories(dest, ec);
+    std::wstring cmd = L"C:\\Windows\\System32\\tar.exe -xf \"" + archive_path.wstring() + L"\" -C \"" + dest.wstring() + L"\"";
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> cmd_buf(cmd.begin(), cmd.end());
+    cmd_buf.push_back(L'\0');
+    if (CreateProcessW(nullptr, cmd_buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, 120000);
+        DWORD exit_code = 1;
+        GetExitCodeProcess(pi.hProcess, &exit_code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        if (exit_code == 0) return true;
+    }
+#endif
+    err = zip_err.empty() ? "Could not extract archive (.zip/.bnp/.7z)." : zip_err;
+    return false;
+}
+
 int enabled_count(const State& st) {
     int n = 0;
     for (auto& m : st.list) n += m.enabled ? 1 : 0;
@@ -568,14 +659,14 @@ bool install_mod(const std::filesystem::path& user_root,
     std::filesystem::remove_all(staging, ec);
 
     bool is_dir = std::filesystem::is_directory(src_path, ec);
-    bool is_zip = false;
+    bool is_archive = false;
     if (!is_dir && std::filesystem::is_regular_file(src_path, ec)) {
         std::string ext = lower(path_to_utf8(src_path.extension()));
-        is_zip = (ext == ".zip");
+        is_archive = (ext == ".zip" || ext == ".bnp" || ext == ".7z");
     }
 
-    if (is_zip) {
-        if (!unzip_to(src_path, staging, err)) {
+    if (is_archive) {
+        if (!extract_archive_to(src_path, staging, err)) {
             std::filesystem::remove_all(staging, ec);
             return false;
         }
@@ -589,18 +680,24 @@ bool install_mod(const std::filesystem::path& user_root,
             return false;
         }
     } else {
-        err = "Select a mod folder or a .zip archive.";
+        err = "Select a mod folder or a .zip / .bnp / .7z archive.";
         return false;
     }
 
     std::filesystem::path resolved = resolve_mod_root(staging);
     if (!looks_like_mod_root(resolved)) {
         std::filesystem::remove_all(staging, ec);
-        err = "That folder or .zip does not look like a BotW mod (no rules.txt, content, aoc, Actor/Pack folders, or patches.txt found).";
+        err = "That folder or archive does not look like a BotW mod (no rules.txt, info.json, content, aoc, Actor/Pack folders, or patches.txt found).";
         return false;
     }
 
-    std::string final_folder = stem;
+    std::string bnp_name;
+    ensure_bnp_rules(resolved, &bnp_name);
+
+    std::string final_folder = !bnp_name.empty() ? bnp_name : stem;
+    for (char& c : final_folder) {
+        if (c == ' ') c = '_';
+    }
     if (resolved != staging) {
         std::string inner = path_to_utf8(resolved.filename());
         if (!inner.empty() && lower(inner) != "content" && lower(inner) != "aoc") {

@@ -14,7 +14,7 @@
 #endif
 
 #include "ppc.h"
-#include "thread.h"
+
 
 // Espresso time base runs at bus clock / 4 = 248.625 MHz / 4.
 static constexpr uint64_t kTimerHz = 62156250;
@@ -83,7 +83,7 @@ const Entry kRes[32] = {
 }  // namespace
 
 extern "C" double ppc_frsqrte(double input) {
-    threads::maybe_preempt_current_fast();
+    
     uint64_t x = dbits(input);
     if ((x << 1) == 0) return bitsd((x & ~0x7FFFFFFFFFFFFFFFULL) | 0x7FF0000000000000ULL);
     uint32_t e = (x >> 52) & 0x7FF;
