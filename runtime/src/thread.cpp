@@ -603,7 +603,10 @@ HLE_EXPORT(coreinit, OSJoinThread) {
     RET(1);
 }
 
-HLE_EXPORT(coreinit, OSGetCurrentThread) { RET(current() ? current()->os : 0); }
+HLE_EXPORT(coreinit, OSGetCurrentThread) {
+    GuestThread* t = c && c->thread ? (GuestThread*)c->thread : current();
+    RET(t ? t->os : 0);
+}
 
 HLE_EXPORT(coreinit, OSSetThreadName) {
     uint32_t os = ARG(0), name = ARG(1);
@@ -641,16 +644,16 @@ HLE_EXPORT(coreinit, OSGetThreadAffinity) { RET(mem::r32(ARG(0) + T_AFFINITY)); 
 
 HLE_EXPORT(coreinit, OSGetThreadSpecific) {
     uint32_t i = ARG(0);
-    GuestThread* t = current();
+    GuestThread* t = c && c->thread ? (GuestThread*)c->thread : current();
     RET(t && i < 16 ? mem::r32(t->os + T_SPECIFIC + 4 * i) : 0);
 }
 HLE_EXPORT(coreinit, OSSetThreadSpecific) {
     uint32_t i = ARG(0);
-    GuestThread* t = current();
+    GuestThread* t = c && c->thread ? (GuestThread*)c->thread : current();
     if (t && i < 16) mem::w32(t->os + T_SPECIFIC + 4 * i, ARG(1));
 }
 
-HLE_EXPORT(coreinit, OSGetCoreId) { RET(current() ? current()->core : 1); }
+HLE_EXPORT(coreinit, OSGetCoreId) { RET(c ? (uint32_t)c->core : (current() ? current()->core : 1)); }
 HLE_EXPORT(coreinit, OSGetStackPointer) { RET(c->r[1]); }
 HLE_EXPORT(coreinit, OSYieldThread) {
     diag_sync("yield");

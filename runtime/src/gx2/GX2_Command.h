@@ -17,17 +17,22 @@ struct GX2PerCoreCBState {
     uint32be* currentWritePtr = nullptr;
     bool isDisplayList = false;
 };
-extern thread_local GX2PerCoreCBState t_cb;
-inline GX2PerCoreCBState& cb() { return t_cb; }  // this thread's write target
+extern thread_local GX2PerCoreCBState* t_cb_ptr;
+GX2PerCoreCBState& cb_slow();
+inline GX2PerCoreCBState& cb() {
+    GX2PerCoreCBState* p = t_cb_ptr;
+    return __builtin_expect(p != nullptr, 1) ? *p : cb_slow();
+}
 
 void GX2Command_Flush(uint32 numU32sForNextBuffer, bool triggerMarkerInterrupt = true);
 void GX2ReserveCmdSpace_Slow(uint32 reservedFreeSpaceInU32);
 inline void GX2ReserveCmdSpace(uint32 n) {
-    uint32be* wp = t_cb.currentWritePtr;
+    GX2PerCoreCBState& c = cb();
+    uint32be* wp = c.currentWritePtr;
     if (__builtin_expect(wp != nullptr, 1)) {
-        uint32 used = (uint32)(wp - t_cb.bufferPtr);
-        uint32 pad = t_cb.isDisplayList ? 0u : 8u;
-        if (__builtin_expect(used + n + pad <= t_cb.bufferSizeInU32s, 1)) return;
+        uint32 used = (uint32)(wp - c.bufferPtr);
+        uint32 pad = c.isDisplayList ? 0u : 8u;
+        if (__builtin_expect(used + n + pad <= c.bufferSizeInU32s, 1)) return;
     }
     GX2ReserveCmdSpace_Slow(n);
 }
@@ -46,17 +51,19 @@ extern uint32 sGX2MainCoreIndex;
 }  // namespace GX2
 
 inline void gx2WriteGather_submitU32AsBE(uint32 v) {
-    uint32be* wp = GX2::t_cb.currentWritePtr;
+    GX2::GX2PerCoreCBState& c = GX2::cb();
+    uint32be* wp = c.currentWritePtr;
     if (__builtin_expect(wp != nullptr, 1)) {
         *wp = v;
-        GX2::t_cb.currentWritePtr = wp + 1;
+        c.currentWritePtr = wp + 1;
     }
 }
 inline void gx2WriteGather_submitU32AsLE(uint32 v) {
-    uint32be* wp = GX2::t_cb.currentWritePtr;
+    GX2::GX2PerCoreCBState& c = GX2::cb();
+    uint32be* wp = c.currentWritePtr;
     if (__builtin_expect(wp != nullptr, 1)) {
         *(uint32*)wp = v;
-        GX2::t_cb.currentWritePtr = wp + 1;
+        c.currentWritePtr = wp + 1;
     }
 }
 void gx2WriteGather_submitU32AsLEArray(uint32* v, uint32 numValues);

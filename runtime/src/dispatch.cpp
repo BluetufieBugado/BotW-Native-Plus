@@ -175,19 +175,43 @@ static void trap_unimplemented_thunk(PPCContext* c) {
 }  // namespace dispatch
 
 // ---- guest calls -----------------------------------------------------------------------------
+// Save and restore only the volatile state that a PowerPC EABI callee may clobber (r0, r3..r12,
+// f0..f13, ps1[0..13], cr[0..1], cr[5..7], lr, ctr, xer, fpscr, res_addr/res_val), rather than
+// copying the entire 1080-byte PPCContext on every host->guest callback.
 uint32_t guest_call(PPCContext* c, uint32_t fn, std::initializer_list<uint32_t> args) {
-    PPCContext saved = *c;
+    uint32_t saved_r0 = c->r[0];
+    uint32_t saved_r5_12[8];
+    memcpy(saved_r5_12, &c->r[5], sizeof(saved_r5_12));
+    double saved_f0 = c->f[0];
+    double saved_f2_13[12];
+    memcpy(saved_f2_13, &c->f[2], sizeof(saved_f2_13));
+    double saved_ps1_0_13[14];
+    memcpy(saved_ps1_0_13, &c->ps1[0], sizeof(saved_ps1_0_13));
+    uint8_t saved_cr_xer[36];
+    memcpy(saved_cr_xer, c->cr, sizeof(saved_cr_xer));
+    uint32_t saved_lr = c->lr;
+    uint32_t saved_ctr = c->ctr;
+    uint32_t saved_fpscr = c->fpscr;
+    uint32_t saved_res_addr = c->res_addr;
+    uint32_t saved_res_val = c->res_val;
+
     int k = 3;
     for (uint32_t a : args) c->r[k++] = a;
     c->lr = 0;  // returns come back here through the C++ call stack, never via LR
     rt_call(c, fn);
     uint32_t r = c->r[3];
-    uint32_t r4 = c->r[4];
-    double f1 = c->f[1];
-    *c = saved;
-    c->r[3] = r;
-    c->r[4] = r4;
-    c->f[1] = f1;
+
+    c->r[0] = saved_r0;
+    memcpy(&c->r[5], saved_r5_12, sizeof(saved_r5_12));
+    c->f[0] = saved_f0;
+    memcpy(&c->f[2], saved_f2_13, sizeof(saved_f2_13));
+    memcpy(&c->ps1[0], saved_ps1_0_13, sizeof(saved_ps1_0_13));
+    memcpy(c->cr, saved_cr_xer, sizeof(saved_cr_xer));
+    c->lr = saved_lr;
+    c->ctr = saved_ctr;
+    c->fpscr = saved_fpscr;
+    c->res_addr = saved_res_addr;
+    c->res_val = saved_res_val;
     return r;
 }
 

@@ -24,7 +24,13 @@ void wait_gpu(uint64_t ts, const char* why) {
     latte::wait_retired(ts);
 }
 }  // namespace
-thread_local GX2PerCoreCBState t_cb;
+static thread_local GX2PerCoreCBState t_cb_storage;
+thread_local GX2PerCoreCBState* t_cb_ptr = nullptr;
+__attribute__((noinline)) GX2PerCoreCBState& cb_slow() {
+    t_cb_ptr = &t_cb_storage;
+    return t_cb_storage;
+}
+#define t_cb (cb())
 namespace {
 thread_local GX2PerCoreCBState t_saved_cb;  // command buffer state while recording a display list
 
