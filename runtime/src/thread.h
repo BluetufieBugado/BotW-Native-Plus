@@ -40,6 +40,7 @@ struct GuestThread {
     // what the thread is blocked on, for dump()
     std::atomic<const char*> wait_kind{nullptr};
     uint32_t wait_obj = 0, wait_lr = 0;
+    uint32_t tls_block = 0;
     struct MutexCacheEntry {
         uint32_t key = 0;
         void* state = nullptr;

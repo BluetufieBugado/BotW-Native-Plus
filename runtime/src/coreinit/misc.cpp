@@ -226,24 +226,27 @@ HLE_EXPORT(coreinit, ENVGetEnvironmentVariable) {
 }
 
 HLE_EXPORT(coreinit, __gh_set_errno) {
-    threads::GuestThread* t = threads::current();
+    threads::GuestThread* t = c && c->thread ? (threads::GuestThread*)c->thread : threads::current();
     if (t) mem::w32(t->os + 0x300, ARG(0));
+}
+
+static __attribute__((noinline)) uint32_t alloc_tls_block(threads::GuestThread* t) {
+    const loader::Module& m = loader::main_module();
+    uint32_t block = mem::sys_alloc(std::max<uint32_t>(m.tls_size, 16) + 16, 16);
+    if (m.tls_image) {
+        mem::commit(block, m.tls_image_size, true);
+        mem::commit(m.tls_image, m.tls_image_size, false);
+        memcpy(mem::host(block), mem::host(m.tls_image), m.tls_image_size);
+    }
+    if (t) t->tls_block = block;
+    return block;
 }
 
 // void* __tls_get_addr(tls_index* ti): ti = {module, offset}
 HLE_EXPORT(coreinit, __tls_get_addr) {
-    threads::GuestThread* t = threads::current();
-    static thread_local uint32_t block = 0;
-    if (!block) {
-        const loader::Module& m = loader::main_module();
-        block = mem::sys_alloc(std::max<uint32_t>(m.tls_size, 16) + 16, 16);
-        if (m.tls_image) {
-            mem::commit(block, m.tls_image_size, true);
-            mem::commit(m.tls_image, m.tls_image_size, false);
-            memcpy(mem::host(block), mem::host(m.tls_image), m.tls_image_size);
-        }
-    }
-    (void)t;
+    threads::GuestThread* t = c && c->thread ? (threads::GuestThread*)c->thread : threads::current();
+    uint32_t block = t ? t->tls_block : 0;
+    if (__builtin_expect(!block, 0)) block = alloc_tls_block(t);
     RET(block + mem::r32(ARG(0) + 4));
 }
 
