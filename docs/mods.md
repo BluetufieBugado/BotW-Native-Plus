@@ -1,17 +1,13 @@
 # Mods
 
-BotW Recompiled can load file replacement mods. A mod is a folder of game files. When the
-game opens a file, the runtime checks the enabled mods first and falls back to the game dump.
-Nothing in the game dump is changed.
-
-**Status: untested in game.** The file index has a unit test (see below) and the code builds
-for Windows, but no mod has been played through with this build yet. Please report what works
-and what does not.
+BotW Recompiled supports Cemu-style graphic packs and file replacement mods. When the game opens a
+file, loads a texture, compiles a shader, or initializes memory, the runtime checks enabled mods in
+load order and falls back to the game dump. Nothing in the game dump is modified.
 
 ## Where mods go
 
-Mods live in the `mods` folder inside the user folder. The user folder is
-`%APPDATA%\BotWRecomp` unless `BOTW_USER_ROOT` points somewhere else.
+Mods live in the `mods` folder inside the user folder (`%APPDATA%\BotWRecomp` unless
+`BOTW_USER_ROOT` points somewhere else):
 
 ```
 %APPDATA%\BotWRecomp\
@@ -19,78 +15,175 @@ Mods live in the `mods` folder inside the user folder. The user folder is
   mods\
     BetterSprint\
       rules.txt
+      patches.txt
       content\
         Actor\Pack\GameROMPlayer.sbactorpack
-    MoreArrows\
+    Clarity\
       rules.txt
-      content\
-        Pack\Bootup.pack
-      aoc\
-        0010\Pack\AocMainField.pack
-    OldTest\
-      content\
+      3904895d1e2b3c4d_0000000000000079_ps.txt
+    LinkleMod\
+      Actor\
+        Pack\GameROMPlayer.sbactorpack
+      Model\
         ...
 ```
 
-- `content\` replaces or adds files in the game's `content` folder. The path inside it is the
-  same as in the game dump, so `content\Actor\Pack\GameROMPlayer.sbactorpack` replaces
-  `content\Actor\Pack\GameROMPlayer.sbactorpack`.
-- `aoc\` is optional and does the same for the DLC files. Both `aoc\0010\...` and the Cemu
-  layout `aoc\content\0010\...` work.
-- Paths are not case sensitive. `Content\actor\pack\...` matches the same file.
-- A mod can also add new files and new folders. They show up in directory listings next to
-  the game's own files.
-- Stick to plain ASCII folder and file names for now. Other names may be skipped.
+## Supported folder layouts
 
-This is the same `content` and `aoc` layout Cemu graphic packs use, so most Cemu content mods
-can be copied in as they are.
+You can drop mods in using any of the common Breath of the Wild mod layouts:
 
-## rules.txt
+1. **Standard Cemu graphic pack layout**: `<ModFolder>\content\...`, `<ModFolder>\aoc\...`, and an
+   optional `<ModFolder>\rules.txt`.
+2. **Direct content layout**: Recognized BotW top-level content folders (`Actor`, `Pack`, `Model`,
+   `UI`, `Map`, `Sound`, `System`, `Message`, `Effect`, `Physics`, `Event`, `Voice`, `Terrain`,
+   `Quest`, `Font`, `Movie`, `Shader`, `Layout`, `Anim`, `Demo`, `NavMesh`, `Rumble`) placed
+   directly inside `<ModFolder>\` without a `content\` wrapper are automatically mapped into
+   `/vol/content/...`.
+3. **Single-child nested archive folders**: If extracting a `.zip` creates an extra wrapper folder
+   (for example `mods\MyMod\MyMod\content\...` or `mods\MyMod\v1.2\rules.txt`), the loader
+   automatically unwraps up to two single-child folders so the mod works without rearranging
+   directories.
+4. **DLC / BCML / UKMM layouts**: Both `aoc\0010\...` and `aoc\content\0010\...` are mapped to the
+   DLC mount.
+5. **Full Unicode / UTF-8 paths**: Folder names and filenames with non-ASCII characters are
+   supported across the launcher and runtime.
 
-`rules.txt` is optional. Only the `[Definition]` section is read, in Cemu graphic pack style:
+## Installing and managing mods in BotWLauncher.exe
 
-```
+Open **Mods** from the launcher sidebar (or right-click the game in the list and choose **Manage
+mods...**):
+
+- **Install Mod (.zip / Folder)...**: Pick a `.zip` archive or an extracted mod folder. The
+  launcher extracts or copies it into `%APPDATA%\BotWRecomp\mods\<ModName>`, enables it in
+  `mods.ini`, and selects it in the list.
+- **Drag and drop**: Drop any `.zip` mod archive or mod folder directly onto the launcher window to
+  install and enable it immediately.
+- **Enable / Disable & Priority**: Check or uncheck mods, or use **Move up** / **Move down** to
+  change priority. Later mods in the list have higher priority and win file conflicts.
+- **Preset selector**: When the selected mod defines `[Preset]` options in `rules.txt`, dropdown
+  selectors appear in the details panel so you can pick presets per category.
+- **Conflict & content summary**: The details panel shows file counts (`content`, `DLC`, `patches`,
+  `shaders`, `texture rules`) and lists which enabled mods the selected mod overrides or is
+  overridden by.
+
+## In-game F1 Mods tab
+
+Press **F1** in game and switch to the **Mods** tab:
+
+- **Enter / A**: Toggle the selected mod `[ON]` or `[OFF]`.
+- **Left / Right**: Cycle active `[Preset]` options for the selected mod.
+- **U / D** (or **X / Y** on controller): Move the selected mod earlier or later in load order.
+- **R**: Reload the mod overlay, `[TextureRedefine]` rules, and data patches immediately
+  (`mods::reload()`). Files that the game only reads once at boot (`Bootup.pack`, `TitleBG.pack`)
+  still require a game restart to reload.
+
+## rules.txt, Presets, Expressions, and TextureRedefine
+
+`rules.txt` supports `[Definition]`, `[Default]`, `[Preset]`, and `[TextureRedefine]`:
+
+```ini
 [Definition]
 titleIds = 00050000101C9400,00050000101C9500,00050000101C9300
-name = Better Sprint
-description = Faster sprint and less stamina use.
-version = 3
+name = Shadow Resolution
+description = Scales shadow map resolution.
+version = 4
+
+[Default]
+$shadowScale = 1.0
+
+[Preset]
+name = Medium (1x)
+category = Shadows
+default = 1
+$shadowScale = 1.0
+
+[Preset]
+name = High (2x)
+category = Shadows
+$shadowScale = 2.0
+
+[TextureRedefine]
+width = 1024
+height = 1024
+formats = 0x005
+overwriteWidth = floor($shadowScale * 1024)
+overwriteHeight = floor($shadowScale * 1024)
 ```
 
-`name` is shown in the log and in the menu. Without it the folder name is used.
-`description` and `version` are optional. Note that in many Cemu packs `version` is the rules
-file format version (often 3 to 7), not the mod's own version. If `titleIds` is there and does
-not include the USA title (`101C9400`), a warning is written to the log, but the mod still
-loads.
+- **Presets**: Single-category and multi-category (`category = ...`) presets are supported,
+  including `default = 1` and `condition = ...` expressions referencing variables from earlier
+  categories.
+- **Expression evaluator**: Variable assignments and `[TextureRedefine]` / `patches.txt` values can
+  use arithmetic (`+`, `-`, `*`, `/`, `%`), comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`), logical
+  operators (`&&`, `||`, `!`), ternary `?:`, and functions (`floor`, `ceil`, `round`, `trunc`,
+  `abs`, `sqrt`, `min`, `max`, `clamp`).
+- **TextureRedefine**: `[TextureRedefine]` sections (`width`, `height`, `depth`, `formats`,
+  `formatsExcluded`, `tileModes`, `tileModesExcluded`, `overwriteWidth`, `overwriteHeight`,
+  `overwriteDepth`, `overwriteFormat`, `overwriteLodBias`, `overwriteAnisotropy`) are evaluated
+  with the active preset variables and fed into `GraphicPack2` ahead of the built-in resolution
+  pack.
 
-Any other sections (presets, `[TextureRedefine]`, and so on) are ignored.
+## Memory, Data, and Entry-Point Patches (`patches.txt` / `patch_*.txt`)
+
+Mods can include `patches.txt` or `patch_*.txt` in Cemu format (`[BotW_...]` sections with
+`moduleMatches = 0x6fd41a61` for v1.5.0 / v208):
+
+```ini
+[BotW_CustomValues]
+moduleMatches = 0x6fd41a61
+
+_customSpeed = 0x10500100
+0x10500100 = .float ($speedMult * 1.5)
+0x10500104 = .int 42
+0x10500108 = .string "MOD"
+0x02500100 = blr
+```
+
+Supported directives and instructions:
+- **Symbols & origins**: `_symName = <expr>` and `origin = 0xXXXXXXXX` (with sequential write cursor
+  advancement for unprefixed directive lines).
+- **Data directives**: `.float <expr>`, `.double <expr>`, `.int` / `.uint` / `.word <expr>`,
+  `.short` / `.ushort <expr>`, `.byte` / `.ubyte <expr>`, `.string "..."` / `.asciiz "..."`, and
+  raw 32-bit hex values (`0xdeadbeef`).
+- **PPC instructions & function entry hooks**:
+  - Encodes `nop`, `blr`, `li rD, imm`, `lis rD, imm`, `b target`, and `bl target`.
+  - Writing `blr` at a known guest function entry in `0x02000000..0x03FFFFFF` installs a no-op stub
+    override in `dispatch`.
+  - Writing `li r3, imm` followed by `blr` at a guest function entry installs a stub override that
+    sets `r3 = imm` and returns.
+  - Writing `b target` at a guest function entry redirects the dispatch table entry to `target`.
+  - Reloading mods restores original guest memory bytes and dispatch entries before applying the
+    new mod state.
+
+## Custom Shader Replacements
+
+Enabled mods can provide custom GLSL shader files in the mod root or a `shaders\` subfolder:
+- Naming conventions: `<baseHash>_ps.txt`, `<baseHash>_vs.txt`, `<baseHash>_gs.txt`, or `.glsl`
+  (with optional `0x` prefix and optional `<baseHash>_<auxHash>_ps.txt`).
+- Active `$preset` variables are injected into custom GLSL sources (replacing `#define $var ...`
+  placeholders, `$var` tokens, and prepending `#define var value` lines after `#version`).
 
 ## mods.ini
 
-`mods.ini` sits in the user folder, next to `settings.ini`. It says which mods are on and in
-what order:
+`mods.ini` sits in the user folder next to `settings.ini`:
 
-```
+```ini
 [Enabled]
 BetterSprint = 1
-MoreArrows = 1
-OldTest = 0
+Clarity = 1
 
 [Order]
-order = MoreArrows,BetterSprint
+order = Clarity,BetterSprint
+
+[Presets]
+Clarity = Serfrost
+ShadowMod:Shadows = High (2x)
 ```
 
-- `[Enabled]`: the key is the mod's folder name and the value is `1` (on) or `0` (off).
-  `true`, `yes`, and `on` also count as on. A mod with no line here is off. Folder names are
-  matched without regard to case. If the same folder appears twice, the last line wins.
-- `[Order]`: optional. `order` is a comma separated list of folder names. Later entries win,
-  so in the example `BetterSprint` beats `MoreArrows` when both have the same file. Enabled
-  mods that are not in the list load first (lowest priority), in alphabetical order.
-- Without `[Order]`, enabled mods load in alphabetical order of their folder names, and the
-  later one wins.
-- Lines starting with `#` or `;` are comments.
-
-If `mods.ini` does not exist, no mods are loaded.
+- `[Enabled]`: `1` (on) or `0` (off).
+- `[Order]`: Comma-separated folder names from lowest priority to highest priority (later wins).
+- `[Presets]`: Selected preset per mod (`ModFolder = PresetName`) or per category
+  (`ModFolder:Category = PresetName`).
 
 ## Turning mods off for one run
 
@@ -98,47 +191,9 @@ If `mods.ini` does not exist, no mods are loaded.
 BotWRecomp.exe --no-mods
 ```
 
-This skips the `mods` folder for that run. `mods.ini` is not changed.
+Skips loading mods for that session without modifying `mods.ini`.
 
-## What the log says
-
-At startup `runtime.log` lists the mods in load order, how many files each one has, how many
-replace a game file and how many are new, and every file that more than one mod provides
-(the first 50, then a total):
-
-```
-mods: 3 mod folders in C:\Users\you\AppData\Roaming\BotWRecomp\mods, 2 enabled
-mod 1: More Arrows [MoreArrows]: 2 files (1 content, 1 aoc), 2 replace game files, 0 new
-mod 2: Better Sprint [BetterSprint] version 3: 1 files (1 content, 0 aoc), 1 replace game files, 0 new
-mods: 2 mods loaded, 3 overlay files, 3 replace a game file, 0 new
-```
-
-A mod that is enabled in `mods.ini` but has no folder gets a warning. On exit the log also
-says how many mod files the game actually opened.
-
-The F1 menu has a read-only **Mods** row that shows how many mods are loaded, or that mods are
-off for this run.
-
-## Other things to know
-
-- Mods are read only. Saves still go to the normal save folder.
-- The game is told the DLC is installed only when `0010\Pack\AocMainField.pack` exists, either
-  in the game dump's `aoc` folder, in a mod, or in a `aoc` folder in the user folder. That user
-  `aoc` folder is for a DLC dump, not a mod, so it is used even with `--no-mods`, and mods win
-  over it.
-- Changes to mods or `mods.ini` take effect the next time the game starts.
-
-## Not supported yet
-
-- Code patches: `patches.txt`, `patch_*.txt`, and Cemu assembly patches. They are counted in
-  the log and skipped.
-- Shader replacements (`*_ps.txt`, `*_vs.txt`, `*_gs.txt`) and graphic pack presets.
-- Non-ASCII paths.
-- Turning mods on or off from inside the game.
-
-## Unit test
-
-The index has a small test that builds a fake game and user folder in the temp directory:
+## Unit tests
 
 ```
 cmake -B build -DBOTW_BUILD_TESTS=ON
@@ -146,5 +201,7 @@ cmake --build build --target BotWModTests
 ./build/BotWModTests
 ```
 
-It covers `mods.ini` and `rules.txt` parsing, load order, which mod wins a conflict, case
-insensitive lookup, merged directory listings, DLC detection, and `--no-mods`.
+Covers `mods.ini` and `rules.txt` parsing, `[Preset]` categories and conditions, expression
+evaluation, `[TextureRedefine]`, `patches.txt` data and function-entry overrides, custom shader
+lookup, direct `Actor/` layouts and nested folder unwrapping, UTF-8 filenames, `move_order`,
+`reload`, and `.zip` / folder installation.

@@ -1,6 +1,7 @@
-// BotWRecomp shim: at most one built-in pack is active, the resolution scaling texture rules
-// (graphic_pack_shim.cpp, --scale); no custom shaders.
+// BotWRecomp GraphicPack2 shim: built-in resolution scaling pack (--scale) plus enabled mods'
+// [TextureRedefine] rules and custom GLSL shader overrides (graphic_pack_shim.cpp).
 #pragma once
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,7 +30,8 @@ class GraphicPack2 {
     };
     static const std::vector<std::shared_ptr<GraphicPack2>>& GetActiveGraphicPacks();
     static void WaitUntilReady() {}
-    static const std::string* FindCustomShaderSource(uint64_t, uint64_t, GP_SHADER_TYPE, bool, bool) { return nullptr; }
+    static const std::string* FindCustomShaderSource(uint64_t baseHash, uint64_t auxHash, GP_SHADER_TYPE type,
+                                                     bool isVulkan, bool isMetal);
     bool AllowRendertargetSizeOptimization() const { return true; }
     const std::vector<TextureRule>& GetTextureRules() const { return m_rules; }
     const std::string& GetName() const { return m_name; }

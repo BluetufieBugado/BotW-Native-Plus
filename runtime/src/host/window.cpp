@@ -638,6 +638,8 @@ void run() {
                     else if (b == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) menu::tab(-1);
                     else if (b == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER) menu::tab(+1);
                     else if (b == SDL_GAMEPAD_BUTTON_SOUTH) menu::activate();
+                    else if (b == SDL_GAMEPAD_BUTTON_WEST) menu::reorder_mod(-1);
+                    else if (b == SDL_GAMEPAD_BUTTON_NORTH) menu::reorder_mod(+1);
                     else if (b == SDL_GAMEPAD_BUTTON_EAST || b == SDL_GAMEPAD_BUTTON_START) menu::close();
                 }
             } else if (e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
@@ -661,6 +663,9 @@ void run() {
                         case SDLK_LEFT: menu::change(-1); break;
                         case SDLK_RIGHT: menu::change(+1); break;
                         case SDLK_RETURN: menu::activate(); break;
+                        case SDLK_U: menu::reorder_mod(-1); break;
+                        case SDLK_D: menu::reorder_mod(+1); break;
+                        case SDLK_R: menu::reload_mods(); break;
                         case SDLK_TAB: menu::tab((e.key.mod & SDL_KMOD_SHIFT) ? -1 : +1); break;
                         case SDLK_PAGEUP: menu::tab(-1); break;
                         case SDLK_PAGEDOWN: menu::tab(+1); break;

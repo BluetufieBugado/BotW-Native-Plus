@@ -322,6 +322,7 @@ if(WIN32)
     launcher/game_info.cpp
     launcher/mods.cpp
     launcher/save_import.cpp
+    launcher/setup_wizard.cpp
     launcher/ui.cpp
     launcher/unzip.cpp
     runtime/src/input/controls_file.cpp
@@ -334,7 +335,7 @@ if(WIN32)
   else()
     target_link_libraries(BotWLauncher PRIVATE SDL3::SDL3)
   endif()
-  target_link_libraries(BotWLauncher PRIVATE ZLIB::ZLIB comctl32 comdlg32 shell32 ole32 uxtheme dwmapi gdiplus)
+  target_link_libraries(BotWLauncher PRIVATE ZLIB::ZLIB comctl32 comdlg32 shell32 ole32 uuid uxtheme dwmapi gdiplus)
   if(MINGW)
     # GUI subsystem, but the entry point stays main() so SDL_main is not required.
     target_link_options(BotWLauncher PRIVATE "-Wl,-e,mainCRTStartup")
@@ -342,6 +343,19 @@ if(WIN32)
   file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/BotWLauncher.cmd" CONTENT
     "@echo off\r\nset \"PATH=C:\\msys64\\ucrt64\\bin;%PATH%\"\r\nstart \"\" \"%~dp0BotWLauncher.exe\"\r\n")
   message(STATUS "BotWLauncher: Windows launcher (BotWLauncher.exe)")
+
+  add_executable(BotWNativeSetup WIN32
+    launcher/installer.cpp
+    launcher/ui.cpp
+    "${CMAKE_BINARY_DIR}/botw_launcher_manifest.rc")
+  set_target_properties(BotWNativeSetup PROPERTIES OUTPUT_NAME "BotW-Native-Setup")
+  target_include_directories(BotWNativeSetup PRIVATE launcher)
+  target_compile_definitions(BotWNativeSetup PRIVATE UNICODE _UNICODE)
+  target_compile_options(BotWNativeSetup PRIVATE -O2 -Wall -Wno-unused-function -Wno-unused-variable -fwrapv)
+  target_link_libraries(BotWNativeSetup PRIVATE comctl32 comdlg32 shell32 ole32 uuid uxtheme dwmapi gdiplus)
+  if(MINGW)
+    target_link_options(BotWNativeSetup PRIVATE "-Wl,-e,mainCRTStartup" -static-libgcc -static-libstdc++ -Wl,-Bstatic,--whole-archive -lwinpthread -Wl,--no-whole-archive,-Bdynamic)
+  endif()
 endif()
 
 message(STATUS "BotWRecomp backends: Metal=${BOTW_ENABLE_METAL} Vulkan=${BOTW_ENABLE_VULKAN}")
@@ -354,6 +368,7 @@ option(BOTW_BUILD_TESTS "Build the BotWModTests unit test" OFF)
 if(BOTW_BUILD_TESTS)
   add_executable(BotWModTests tests/mods_test.cpp runtime/src/coreinit/mods.cpp runtime/src/log.cpp)
   target_include_directories(BotWModTests PRIVATE runtime/src)
+  target_link_libraries(BotWModTests PRIVATE ZLIB::ZLIB)
   enable_testing()
   add_test(NAME mods COMMAND BotWModTests)
 endif()

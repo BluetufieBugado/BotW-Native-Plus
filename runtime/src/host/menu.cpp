@@ -18,7 +18,23 @@ std::atomic<bool> g_open{false};
 int g_cursor = 0;  // selected row inside the current tab (the last row of every tab is Close)
 int g_tab = 0;
 
-enum RowId { kFps, kScale, kDisplay, kFilter, kGamepadView, kGyro, kRumble, kLayout, kTouch, kShowFps, kMods, kVolume, kClose, kRows };
+enum RowId {
+    kFps,
+    kScale,
+    kDisplay,
+    kFilter,
+    kGamepadView,
+    kGyro,
+    kRumble,
+    kLayout,
+    kTouch,
+    kShowFps,
+    kMods,
+    kVolume,
+    kModReload,
+    kClose,
+    kRows
+};
 const float kScales[] = {0, 0.5f, 0.75f, 1, 1.5f, 2, 2.5f, 3};  // 0 = fit the display
 
 // Tabs. Every setting of the previous flat list is in exactly one tab; the order inside a tab follows
@@ -43,7 +59,10 @@ int row_id(int t, int cursor) {
     if (t == kTabMods) {
         auto list = mods::status();
         if (list.empty()) return cursor == 0 ? (int)kMods : (int)kClose;
-        return cursor >= 0 && cursor < (int)list.size() ? (kModRowBase + cursor) : (int)kClose;
+        int n = (int)list.size();
+        if (cursor >= 0 && cursor < n) return kModRowBase + cursor;
+        if (cursor == n) return (int)kModReload;
+        return (int)kClose;
     }
     const std::vector<int>& r = tab_rows(t);
     return cursor >= 0 && cursor < (int)r.size() ? r[cursor] : (int)kClose;
@@ -51,7 +70,7 @@ int row_id(int t, int cursor) {
 int row_count(int t) {
     if (t == kTabMods) {
         auto list = mods::status();
-        return (list.empty() ? 1 : (int)list.size()) + 1;
+        return list.empty() ? 2 : ((int)list.size() + 2);
     }
     return (int)tab_rows(t).size() + 1;
 }
@@ -94,6 +113,38 @@ void step(Settings& s, int row, int dir) {
         case kShowFps: s.show_fps = !s.show_fps; break;
         case kVolume: s.volume = std::clamp(s.volume + dir * 10, 0, 100); break;
     }
+}
+
+void cycle_mod_preset(const mods::DiscoveredMod& m, int dir) {
+    for (const auto& pc : m.presets) {
+        if (pc.options.size() <= 1) continue;
+        int active_idx = 0;
+        for (int i = 0; i < (int)pc.options.size(); ++i) {
+            if (pc.options[i] == pc.active) {
+                active_idx = i;
+                break;
+            }
+        }
+        int n = (int)pc.options.size();
+        int next_idx = ((active_idx + dir) % n + n) % n;
+        mods::set_preset(m.folder, pc.category, pc.options[next_idx]);
+        return;
+    }
+    mods::set_enabled(m.folder, !m.enabled);
+}
+
+std::string format_active_presets(const mods::DiscoveredMod& m) {
+    std::string out;
+    for (const auto& pc : m.presets) {
+        if (pc.active.empty()) continue;
+        if (!out.empty()) out += ", ";
+        if (!pc.category.empty() && m.presets.size() > 1) {
+            out += pc.category + ": " + pc.active;
+        } else {
+            out += pc.active;
+        }
+    }
+    return out;
 }
 }  // namespace
 
@@ -166,12 +217,16 @@ void change(int dir) {
         std::lock_guard<std::mutex> l(g_lock);
         row = row_id(g_tab, g_cursor);
     }
-    if (row == kClose || row == kMods) return;
+    if (row == kClose || row == kMods || row == kModReload) return;
     if (row >= kModRowBase) {
         auto list = mods::status();
         int idx = row - kModRowBase;
         if (idx >= 0 && idx < (int)list.size()) {
-            mods::set_enabled(list[idx].folder, !list[idx].enabled);
+            if (!list[idx].presets.empty()) {
+                cycle_mod_preset(list[idx], dir);
+            } else {
+                mods::set_enabled(list[idx].folder, !list[idx].enabled);
+            }
         }
         return;
     }
@@ -188,7 +243,48 @@ void activate() {
     }
     if (row == kClose) close();
     else if (row == kMods) select_tab(kTabMods);
-    else change(+1);
+    else if (row == kModReload) mods::reload();
+    else if (row >= kModRowBase) {
+        auto list = mods::status();
+        int idx = row - kModRowBase;
+        if (idx >= 0 && idx < (int)list.size()) {
+            mods::set_enabled(list[idx].folder, !list[idx].enabled);
+        }
+    } else change(+1);
+}
+
+void reorder_mod(int delta) {
+    if (delta == 0) return;
+    int tab_now, cursor;
+    {
+        std::lock_guard<std::mutex> l(g_lock);
+        tab_now = g_tab;
+        cursor = g_cursor;
+    }
+    if (tab_now != kTabMods) return;
+    auto list = mods::status();
+    if (cursor < 0 || cursor >= (int)list.size()) return;
+    std::string target_folder = list[cursor].folder;
+    if (mods::move_order(target_folder, delta)) {
+        auto updated = mods::status();
+        std::lock_guard<std::mutex> l(g_lock);
+        for (int i = 0; i < (int)updated.size(); ++i) {
+            if (updated[i].folder == target_folder) {
+                g_cursor = i;
+                break;
+            }
+        }
+    }
+}
+
+void reload_mods() {
+    int tab_now;
+    {
+        std::lock_guard<std::mutex> l(g_lock);
+        tab_now = g_tab;
+    }
+    if (tab_now != kTabMods) return;
+    mods::reload();
 }
 
 void click(int row, int dir) {
@@ -234,22 +330,61 @@ View view() {
     all[kMods] = {"Mods", mods::summary(), false, true};
     snprintf(b, sizeof b, "%d%%", s.volume);
     all[kVolume] = {"Volume", b};
+    all[kModReload] = {"Apply / Reload Overlay (R)", "", true};
     all[kClose] = {"Close", "", true};
     if (tab_now == kTabMods) {
         auto list = mods::status();
         if (list.empty()) {
             v.rows.push_back({"Mods folder", mods::disabled_by_flag() ? "Off (--no-mods)" : "No mods found in mods/", false, true});
         } else {
+            int priority = 1;
             for (const auto& m : list) {
-                std::string label = m.name;
+                std::string label;
+                if (m.enabled) {
+                    label = std::to_string(priority++) + ". " + m.name;
+                } else {
+                    label = "-. " + m.name;
+                }
                 if (!m.version.empty()) label += " (v" + m.version + ")";
+
                 std::string val;
-                if (m.enabled && m.loaded_now) val = "[On] (loaded)";
-                else if (m.enabled && !m.loaded_now) val = "[On] (restart to load)";
-                else if (!m.enabled && m.loaded_now) val = "[Off] (restart to unload)";
-                else val = "[Off]";
+                if (m.enabled && m.loaded_now) val = "[ON]";
+                else if (m.enabled && !m.loaded_now) val = "[ON*]";
+                else if (!m.enabled && m.loaded_now) val = "[OFF*]";
+                else val = "[OFF]";
+
+                std::string active_preset = format_active_presets(m);
+                if (!active_preset.empty()) {
+                    val += " <" + active_preset + ">";
+                }
+
+                uint64_t total_files = static_cast<uint64_t>(m.content_files) + static_cast<uint64_t>(m.aoc_files);
+                char counts[64];
+                if (total_files > 0 && m.patch_files > 0) {
+                    snprintf(counts, sizeof counts, " (%llu files, %u patch)",
+                             static_cast<unsigned long long>(total_files), m.patch_files);
+                    val += counts;
+                } else if (total_files > 0) {
+                    snprintf(counts, sizeof counts, " (%llu %s)",
+                             static_cast<unsigned long long>(total_files),
+                             total_files == 1 ? "file" : "files");
+                    val += counts;
+                } else if (m.patch_files > 0) {
+                    snprintf(counts, sizeof counts, " (%u %s)",
+                             m.patch_files, m.patch_files == 1 ? "patch" : "patches");
+                    val += counts;
+                } else if (!m.texture_rules.empty() || m.shader_files > 0) {
+                    val += " (gfx pack)";
+                }
+
+                if (m.overridden_files > 0) {
+                    snprintf(counts, sizeof counts, " [%llu overridden]",
+                             static_cast<unsigned long long>(m.overridden_files));
+                    val += counts;
+                }
                 v.rows.push_back({label, val, false, false});
             }
+            v.rows.push_back(all[kModReload]);
         }
         v.rows.push_back(all[kClose]);
     } else {
@@ -263,8 +398,8 @@ View view() {
         v.note = "Controls changes apply at once and are saved to settings.ini.";
     } else if (tab_now == kTabMods) {
         v.note = mods::pending_restart()
-                     ? "Saved to mods.ini. Restart game to apply mod changes."
-                     : "Toggle mods [On] / [Off] in mods.ini. Restart game to apply mod changes.";
+                     ? "Enter/A: Toggle ON/OFF | Left/Right: Preset | U/D (X/Y): Order | R: Reload (boot packs need restart)"
+                     : "Enter/A: Toggle ON/OFF | Left/Right: Preset | U/D (X/Y): Order | R: Apply / Reload overlay now";
     } else if (tab_now == kTabAbout) {
         v.text = {
             "BotW-Native",

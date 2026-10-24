@@ -284,7 +284,7 @@ int32_t open_file(PPCContext* c, const std::string& raw, const char* mode, uint3
     for (char ch : m)
         if (ch != 'b') hm += ch;
     hm += 'b';
-    FILE* f = fopen(hp.c_str(), hm.c_str());
+    FILE* f = mods::fopen_utf8(hp, hm.c_str());
     if (!f) return fail(c, errno == ENOENT ? FS_NOT_FOUND : FS_PERMISSION, mask, "open", gpath);
     if (overlay) mods::note_opened(gpath);
     Handle opened;
