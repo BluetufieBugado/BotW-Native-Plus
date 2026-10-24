@@ -158,12 +158,21 @@ static void test_index(const fs::path& root) {
     CHECK(mods::list_dir("/vol/content/Actor", items) == mods::ListStatus::NotVolume);
     CHECK(mods::summary() == "Off for this run (--no-mods)");
 
-    // No mods.ini: nothing is enabled.
+    // No mods.ini: nothing is enabled, but status() still lists discovered mods and set_enabled() updates mods.ini.
     fs::remove(user / "mods.ini");
     mods::init(game.string(), user.string());
     CHECK(mods::loaded().empty() && mods::index_files() == 0);
     CHECK(mods::query("/vol/content/System/Version.txt").kind == mods::Query::Kind::Other);
     CHECK(mods::summary() == "None loaded");
+    auto st = mods::status();
+    CHECK(st.size() == 3 && !st[0].enabled && !st[0].loaded_now);
+    CHECK(!mods::pending_restart());
+    CHECK(mods::set_enabled("ModA", true));
+    CHECK(mods::pending_restart());
+    st = mods::status();
+    CHECK(st.size() == 3 && st[0].folder == "ModA" && st[0].enabled && !st[0].loaded_now);
+    CHECK(mods::set_enabled("ModA", false));
+    CHECK(!mods::pending_restart());
 }
 
 int main() {

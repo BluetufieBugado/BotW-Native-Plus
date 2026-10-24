@@ -46,6 +46,10 @@ bool g_title_from_meta = false;
 bool g_pack = false;
 bool g_inited = false;
 bool g_no_mods = false;
+std::string g_user_path;
+std::mutex g_disc_mu;
+std::vector<DiscoveredMod> g_discovered;
+bool g_pending_restart = false;
 std::vector<ModInfo> g_mods;
 std::vector<Conflict> g_conflicts;
 std::unordered_set<uint16_t> g_owned;
@@ -503,12 +507,64 @@ void reset() {
     g_title_from_meta = false;
     g_pack = false;
     g_no_mods = false;
+    g_user_path.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_disc_mu);
+        g_discovered.clear();
+        g_pending_restart = false;
+    }
     g_mods.clear();
     g_conflicts.clear();
     g_owned.clear();
     g_opened.clear();
     g_case_cache.clear();
     g_files = g_replacing = g_added = 0;
+}
+
+void scan_discovered(const fs::path& user) {
+    if (user.empty()) return;
+    fs::path mods_dir = user / "mods";
+    std::error_code ec;
+    std::vector<std::string> present;
+    for (fs::directory_iterator it(mods_dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        std::error_code sec;
+        if (!it->is_directory(sec)) continue;
+        std::string name = path_str(it->path().filename());
+        if (valid_folder(name)) present.push_back(name);
+    }
+    std::sort(present.begin(), present.end(), iless);
+    std::string ini = read_text(user / "mods.ini", 256 * 1024);
+    Config cfg = parse_config(ini);
+    std::vector<std::string> ordered;
+    if (cfg.has_order) {
+        for (const auto& o : cfg.order)
+            for (const auto& p : present)
+                if (lower_ascii(p) == lower_ascii(o)) ordered.push_back(p);
+        for (const auto& p : present) {
+            bool seen = false;
+            for (const auto& x : ordered)
+                if (lower_ascii(x) == lower_ascii(p)) seen = true;
+            if (!seen) ordered.push_back(p);
+        }
+    } else {
+        ordered = present;
+    }
+    std::vector<DiscoveredMod> list;
+    list.reserve(ordered.size());
+    for (const std::string& folder : ordered) {
+        fs::path dir = mods_dir / folder;
+        Rules rules = parse_rules(read_text(dir / "rules.txt", 64 * 1024));
+        DiscoveredMod d;
+        d.folder = folder;
+        d.name = rules.name.empty() ? folder : rules.name;
+        d.version = rules.version;
+        d.enabled = cfg.is_enabled(folder);
+        for (const auto& m : g_mods)
+            if (lower_ascii(m.folder) == lower_ascii(folder)) d.loaded_now = true;
+        list.push_back(std::move(d));
+    }
+    std::lock_guard<std::mutex> lock(g_disc_mu);
+    g_discovered = std::move(list);
 }
 
 void load_mods(const fs::path& user) {
@@ -680,6 +736,7 @@ void init(const std::string& game_root, const std::string& user_root, bool enabl
     reset();
     g_inited = true;
     g_no_mods = !enabled;
+    g_user_path = user_root;
     if (!game_root.empty()) {
         fs::path game(game_root);
         g_content_base = path_str(game / "content");
@@ -701,6 +758,7 @@ void init(const std::string& game_root, const std::string& user_root, bool enabl
 
     if (g_no_mods) LOG("mods: off for this run (--no-mods)");
     else if (!user.empty()) load_mods(user);
+    if (!user.empty()) scan_discovered(user);
 
     uint64_t pack_sz = 0;
     if (is_file(case_path(g_aoc_base, "0010/Pack/AocMainField.pack"), pack_sz)) g_pack = true;
@@ -889,6 +947,94 @@ std::string summary() {
     }
     if (s.size() > 40) s = s.substr(0, 37) + "...";
     return s;
+}
+
+
+std::vector<DiscoveredMod> status() {
+    std::lock_guard<std::mutex> lock(g_disc_mu);
+    return g_discovered;
+}
+
+bool pending_restart() {
+    std::lock_guard<std::mutex> lock(g_disc_mu);
+    return g_pending_restart;
+}
+
+bool set_enabled(std::string_view folder, bool on) {
+    if (g_user_path.empty() || !valid_folder(std::string(folder))) return false;
+    fs::path user(g_user_path);
+    fs::path ini_path = user / "mods.ini";
+    std::string text = read_text(ini_path, 256 * 1024);
+
+    // Preserve existing sections and order while updating [Enabled] <folder> = 1/0
+    struct Sec {
+        std::string name;
+        std::vector<std::pair<std::string, std::string>> kv;
+    };
+    std::vector<Sec> secs;
+    auto find_sec = [&](std::string_view n) -> Sec* {
+        std::string want = lower_ascii(std::string(n));
+        for (auto& s : secs)
+            if (lower_ascii(s.name) == want) return &s;
+        return nullptr;
+    };
+    each_ini_line(text, [&](const std::string& sec, const std::string& key, const std::string& val) {
+        Sec* s = find_sec(sec);
+        if (!s) {
+            std::string title = sec == "enabled" ? "Enabled" : sec == "order" ? "Order" : sec;
+            secs.push_back({title, {}});
+            s = &secs.back();
+        }
+        s->kv.emplace_back(key, val);
+    });
+    Sec* en = find_sec("Enabled");
+    if (!en) {
+        secs.insert(secs.begin(), {"Enabled", {}});
+        en = &secs.front();
+    }
+    bool updated = false;
+    std::string want = lower_ascii(std::string(folder));
+    for (auto& [k, v] : en->kv) {
+        if (lower_ascii(k) == want) {
+            v = on ? "1" : "0";
+            updated = true;
+        }
+    }
+    if (!updated) en->kv.emplace_back(std::string(folder), on ? "1" : "0");
+
+    std::error_code ec;
+    fs::create_directories(user, ec);
+    fs::path tmp = ini_path;
+    tmp += ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+        bool first = true;
+        for (const auto& s : secs) {
+            if (!first) out << "\r\n";
+            first = false;
+            if (!s.name.empty()) out << "[" << s.name << "]\r\n";
+            for (const auto& [k, v] : s.kv) out << k << "=" << v << "\r\n";
+        }
+        if (!out) return false;
+    }
+    fs::rename(tmp, ini_path, ec);
+    if (ec) {
+        fs::remove(ini_path, ec);
+        fs::rename(tmp, ini_path, ec);
+        if (ec) return false;
+    }
+
+    std::lock_guard<std::mutex> lock(g_disc_mu);
+    bool diff = false;
+    for (auto& d : g_discovered) {
+        if (lower_ascii(d.folder) == want) {
+            d.enabled = on;
+        }
+        if (d.enabled != d.loaded_now) diff = true;
+    }
+    g_pending_restart = diff;
+    return true;
 }
 
 }  // namespace mods
