@@ -68,40 +68,51 @@ inline void gx2WriteGather_submitU32AsLE(uint32 v) {
 }
 void gx2WriteGather_submitU32AsLEArray(uint32* v, uint32 numValues);
 
-template <typename... Targs>
-inline void gx2WriteGather_submit_(uint32be* writePtr) {
-    GX2::cb().currentWritePtr = writePtr;
+template <typename T>
+inline uint32 gx2CmdWordToBE(const betype<T>& arg) {
+    static_assert(sizeof(betype<T>) == sizeof(uint32));
+    uint32 raw;
+    memcpy(&raw, &arg, 4);
+    return raw;
 }
-template <typename T, typename... Targs>
-inline void gx2WriteGather_submit_(uint32be* writePtr, const betype<T>& arg, Targs... args) {
-    static_assert(sizeof(betype<T>) == sizeof(uint32be));
-    *(betype<T>*)writePtr = arg;
-    gx2WriteGather_submit_(writePtr + 1, args...);
-}
-template <typename T, typename... Targs>
+template <typename T>
     requires std::is_floating_point_v<T>
-inline void gx2WriteGather_submit_(uint32be* writePtr, const T& arg, Targs... args) {
+inline uint32 gx2CmdWordToBE(const T& arg) {
     static_assert(sizeof(T) == sizeof(uint32));
     uint32 u;
     memcpy(&u, &arg, 4);
-    *writePtr = u;
-    gx2WriteGather_submit_(writePtr + 1, args...);
+    return _swapEndianU32(u);
 }
-template <typename T, typename... Targs>
+template <typename T>
     requires std::is_base_of_v<Latte::LATTEREG, T>
-inline void gx2WriteGather_submit_(uint32be* writePtr, const T& arg, Targs... args) {
-    *writePtr = arg.getRawValue();
-    gx2WriteGather_submit_(writePtr + 1, args...);
+inline uint32 gx2CmdWordToBE(const T& arg) {
+    return _swapEndianU32(arg.getRawValue());
 }
-template <typename T, typename... Targs>
+template <typename T>
     requires(!std::is_base_of_v<Latte::LATTEREG, T>) && (!std::is_floating_point_v<T>)
-inline void gx2WriteGather_submit_(uint32be* writePtr, const T& arg, Targs... args) {
-    *writePtr = (uint32)arg;
-    gx2WriteGather_submit_(writePtr + 1, args...);
+inline uint32 gx2CmdWordToBE(const T& arg) {
+    return _swapEndianU32((uint32)arg);
 }
+
+inline void gx2WriteGather_submit_(uint32* writePtr) {}
+
+template <typename T0>
+inline void gx2WriteGather_submit_(uint32* writePtr, const T0& a0) {
+    writePtr[0] = gx2CmdWordToBE(a0);
+}
+
+template <typename T0, typename T1, typename... Targs>
+inline void gx2WriteGather_submit_(uint32* writePtr, const T0& a0, const T1& a1, const Targs&... rest) {
+    uint64 pair = (uint64)gx2CmdWordToBE(a0) | ((uint64)gx2CmdWordToBE(a1) << 32);
+    memcpy(writePtr, &pair, 8);
+    gx2WriteGather_submit_(writePtr + 2, rest...);
+}
+
 template <typename... Targs>
-inline void gx2WriteGather_submit(Targs... args) {
-    uint32be* p = GX2::cb().currentWritePtr;
-    if (!p) return;
-    gx2WriteGather_submit_(p, std::forward<Targs>(args)...);
+inline void gx2WriteGather_submit(const Targs&... args) {
+    GX2::GX2PerCoreCBState& c = GX2::cb();
+    uint32be* p = c.currentWritePtr;
+    if (__builtin_expect(!p, 0)) return;
+    gx2WriteGather_submit_((uint32*)p, args...);
+    c.currentWritePtr = p + sizeof...(Targs);
 }
