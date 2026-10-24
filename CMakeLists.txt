@@ -103,6 +103,10 @@ endif()
 
 # Recompiled guest code (tools/recompile.py writes generated/). Without it, a stub links so the
 # Vulkan device can still be brought up.
+set(BOTW_PREBUILT_GUEST_DIR "" CACHE PATH "Directory containing prebuilt guest/*.cpp.obj to link instead of recompiling generated/")
+if(BOTW_PREBUILT_GUEST_DIR)
+  file(GLOB _GUEST_OBJS "${BOTW_PREBUILT_GUEST_DIR}/*.obj" "${BOTW_PREBUILT_GUEST_DIR}/*.o")
+else()
 file(GLOB GUEST_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_SOURCE_DIR}/generated/fn_*.cpp
   ${CMAKE_SOURCE_DIR}/generated/big_*.cpp
@@ -128,6 +132,7 @@ if(BIG_SOURCES)
 endif()
 if(HUGE_SOURCES)
   set_source_files_properties(${HUGE_SOURCES} PROPERTIES COMPILE_OPTIONS "-O0")
+endif()
 endif()
 
 # Vendored Cemu Latte GPU layer (runtime/cemu, MPL-2.0) + shims.
@@ -207,7 +212,12 @@ if(NOT APPLE)
   list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "\\.mm$")
 endif()
 
-add_executable(BotWRecomp ${RUNTIME_SOURCES} $<TARGET_OBJECTS:guest> $<TARGET_OBJECTS:cemu_gpu>)
+if(BOTW_PREBUILT_GUEST_DIR)
+  add_executable(BotWRecomp ${RUNTIME_SOURCES} ${_GUEST_OBJS} $<TARGET_OBJECTS:cemu_gpu>)
+  set_source_files_properties(${_GUEST_OBJS} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+else()
+  add_executable(BotWRecomp ${RUNTIME_SOURCES} $<TARGET_OBJECTS:guest> $<TARGET_OBJECTS:cemu_gpu>)
+endif()
 target_include_directories(BotWRecomp PRIVATE runtime/include runtime/src generated)
 if(APPLE)
   target_compile_options(BotWRecomp PRIVATE -Wall -Wno-unused-function -Wno-unused-variable -fwrapv -mcpu=apple-m1

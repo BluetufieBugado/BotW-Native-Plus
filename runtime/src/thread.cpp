@@ -364,6 +364,14 @@ void dump(bool stacks) {
 #endif
 }
 
+std::vector<std::pair<pthread_t, std::string>> snapshot_live() {
+    std::vector<std::pair<pthread_t, std::string>> out;
+    std::lock_guard<std::mutex> l(g_klock);
+    for (auto& [os, t] : g_threads)
+        if (t->started && !t->exited && t->host_tid) out.emplace_back(t->host_tid, t->name);
+    return out;
+}
+
 void init_context(PPCContext* c, uint32_t stack_top, int core) {
     memset(c, 0, sizeof *c);
     c->r[1] = (stack_top - 0x20) & ~0xFu;

@@ -24,6 +24,7 @@ extern std::atomic<pthread_t> g_gpu_thread;  // cemu_shims/overlay_menu.cpp: Cem
 #include "menu.h"
 #include "../settings.h"
 #include "touch.h"
+#include "../bench/bench.h"
 #include "../thread.h"
 
 extern "C" int g_trace_hle;
@@ -193,6 +194,7 @@ void apply_input() {
             ++it;
         }
     }
+    s.buttons |= bench::buttons();
     s.lx = std::clamp(s.lx, -1.f, 1.f);
     s.ly = std::clamp(s.ly, -1.f, 1.f);
     s.rx = std::clamp(s.rx, -1.f, 1.f);
@@ -437,6 +439,7 @@ void run() {
                                              on && g_use_rumble ? 1000 : 0);
             }
         }
+        if (bench::tick()) break;
         if (g_run_seconds && SDL_GetTicks() - t0 > (Uint64)g_run_seconds * 1000) {
             LOG("time limit reached (%d s)", g_run_seconds);
             break;

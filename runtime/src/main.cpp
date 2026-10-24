@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <string>
 
+#include "bench/bench.h"
 #include "coreinit/mods.h"
 #include "hle.h"
 #include "loader.h"
@@ -146,6 +147,7 @@ int main(int argc, char** argv) {
 
     int capture_every = 0;
     bool use_mods = true;
+    bench::Options bench_opt;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--game" && i + 1 < argc) g_game_root = argv[++i];
@@ -161,6 +163,13 @@ int main(int argc, char** argv) {
         else if (a == "--no-gamepad-view") opt.gamepad_view = false;
         else if (a == "--trace-frames" && i + 1 < argc) sscanf(argv[++i], "%llu-%llu", &g_trace_from, &g_trace_to);
         else if (a == "--seconds" && i + 1 < argc) g_run_seconds = atoi(argv[++i]);
+        else if (a == "--bench" && i + 1 < argc) bench_opt.seconds = atoi(argv[++i]);
+        else if (a == "--bench-settle" && i + 1 < argc) bench_opt.settle = atoi(argv[++i]);
+        else if (a == "--bench-timeout" && i + 1 < argc) bench_opt.timeout = atoi(argv[++i]);
+        else if (a == "--bench-uncap") bench_opt.uncap_hz = 2000;
+        else if (a == "--bench-uncap-hz" && i + 1 < argc) bench_opt.uncap_hz = atoi(argv[++i]);
+        else if (a == "--bench-profile") bench_opt.profile = true;
+        else if (a == "--bench-min-draws" && i + 1 < argc) bench_opt.min_draws = atoi(argv[++i]);
         else if (a == "--fps" && i + 1 < argc) opt.fps = atoi(argv[++i]) >= 60 ? 60 : 30;
         else if (a == "--renderer" && i + 1 < argc) latte::select_backend(argv[++i]);
         else if (a == "--scale" && i + 1 < argc) opt.scale = (float)atof(argv[++i]);
@@ -168,6 +177,12 @@ int main(int argc, char** argv) {
             std::string m = argv[++i];
             opt.display = m == "stretch" ? 1 : m == "fill" ? 2 : 0;
         }
+    }
+    if (bench_opt.seconds > 0) {
+        g_mute = true;
+        use_mods = false;
+        opt.fps = 60;
+        bench::configure(bench_opt);
     }
     if (const char* e = getenv("BOTW_RENDERER")) latte::select_backend(e);
     settings::set(opt, false);  // this run only; the menu saves its changes
@@ -220,6 +235,7 @@ int main(int argc, char** argv) {
     debug_watch_init();
     if (capture_every) latte::set_capture(capture_every, (g_user_root + "/captures").c_str());
 
+    bench::start();
     uint32_t argv_g = os::build_argv("U-King.rpx");
     threads::start_main(loader::main_module().entry, 1, argv_g, loader::main_module().stack_size);
     os::host_main_loop();  // returns when the game exits or the time limit is reached
