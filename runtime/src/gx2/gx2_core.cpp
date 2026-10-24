@@ -23,7 +23,9 @@ void wait_gpu(uint64_t ts, const char* why) {
     handoff.yield();
     latte::wait_retired(ts);
 }
+}  // namespace
 thread_local GX2PerCoreCBState t_cb;
+namespace {
 thread_local GX2PerCoreCBState t_saved_cb;  // command buffer state while recording a display list
 
 // command pool: ring buffer of command buffers; in-flight regions retire with their timestamps
@@ -117,8 +119,6 @@ void event_thread() {
 }
 }  // namespace
 
-GX2PerCoreCBState& cb() { return t_cb; }
-
 void GX2Command_Flush(uint32 numU32sForNextBuffer, bool triggerMarkerInterrupt) {
     if (t_cb.isDisplayList) return;
     if (!g_pool_base) return;
@@ -135,7 +135,7 @@ void GX2Command_Flush(uint32 numU32sForNextBuffer, bool triggerMarkerInterrupt) 
     start_new_buffer(numU32sForNextBuffer);
 }
 
-void GX2ReserveCmdSpace(uint32 n) {
+void GX2ReserveCmdSpace_Slow(uint32 n) {
     if (!t_cb.currentWritePtr) {
         if (!g_pool_base) return;
         start_new_buffer(n);
@@ -341,16 +341,6 @@ void GX2SetDRCScale(uint32 w, uint32 h) {}
 void GX2SetVerifyLevel(uint32 level) {}
 }  // namespace GX2
 
-void gx2WriteGather_submitU32AsBE(uint32 v) {
-    auto& c = GX2::cb();
-    if (!c.currentWritePtr) return;
-    *c.currentWritePtr++ = v;
-}
-void gx2WriteGather_submitU32AsLE(uint32 v) {
-    auto& c = GX2::cb();
-    if (!c.currentWritePtr) return;
-    *(uint32*)c.currentWritePtr++ = v;
-}
 void gx2WriteGather_submitU32AsLEArray(uint32* v, uint32 n) {
     auto& c = GX2::cb();
     if (!c.currentWritePtr) return;

@@ -137,7 +137,14 @@ namespace window { void on_frame(uint64_t frame); }
 void botw_capture_hook_metal(LatteTextureView* view, bool isPadView, const std::string& path);
 #endif
 
+namespace {
+thread_local uint32 t_rb_batch[128];
+thread_local uint32 t_rb_pos = 0;
+thread_local uint32 t_rb_len = 0;
+}  // namespace
+
 void TCL::TCLGPUWaitForWork(int max_us) {
+    if (t_rb_pos < t_rb_len) return;
     std::unique_lock<std::mutex> l(g_rb_lock);
     if (!g_rb.empty()) return;
     g_rb_waiting = true;
@@ -145,10 +152,21 @@ void TCL::TCLGPUWaitForWork(int max_us) {
     g_rb_waiting = false;
 }
 bool TCL::TCLGPUReadRBWord(uint32& w) {
+    if (__builtin_expect(t_rb_pos < t_rb_len, 1)) {
+        w = t_rb_batch[t_rb_pos++];
+        return true;
+    }
     std::lock_guard<std::mutex> l(g_rb_lock);
     if (g_rb.empty()) return false;
     w = g_rb.front();
     g_rb.pop_front();
+    uint32 n = 0;
+    while (!g_rb.empty() && n < 128) {
+        t_rb_batch[n++] = g_rb.front();
+        g_rb.pop_front();
+    }
+    t_rb_pos = 0;
+    t_rb_len = n;
     return true;
 }
 void TCL::TCLGPUNotifyNewRetirementTimestamp() {

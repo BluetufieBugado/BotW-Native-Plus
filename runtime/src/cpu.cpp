@@ -2,6 +2,13 @@
 #include <math.h>
 #include <time.h>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #ifndef CLOCK_MONOTONIC_RAW
 #define CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
 #endif
@@ -12,15 +19,28 @@
 static constexpr uint64_t kTimerHz = 62156250;
 
 extern "C" uint64_t rt_timebase(void) {
-    struct timespec ts{};
-    // winpthreads implements CLOCK_MONOTONIC (QueryPerformanceCounter) and rejects
-    // unknown ids with EINVAL. A mingw header that defines CLOCK_MONOTONIC_RAW to
-    // a Linux value would leave `ts` untouched and make OSGetTime jump.
 #if defined(_WIN32)
-    const clockid_t clk = CLOCK_MONOTONIC;
+    static const uint64_t freq = []() -> uint64_t {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        return (uint64_t)f.QuadPart;
+    }();
+    static const uint64_t qpc0 = []() -> uint64_t {
+        LARGE_INTEGER c{};
+        QueryPerformanceCounter(&c);
+        return (uint64_t)c.QuadPart;
+    }();
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    uint64_t ticks = (uint64_t)now.QuadPart - qpc0;
+#if defined(__SIZEOF_INT128__)
+    return (uint64_t)((__uint128_t)ticks * kTimerHz / freq);
 #else
-    const clockid_t clk = CLOCK_MONOTONIC_RAW;
+    return ticks / freq * kTimerHz + (ticks % freq) * kTimerHz / freq;
 #endif
+#else
+    struct timespec ts{};
+    const clockid_t clk = CLOCK_MONOTONIC_RAW;
     if (clock_gettime(clk, &ts) != 0) clock_gettime(CLOCK_MONOTONIC, &ts);
     static const uint64_t t0 = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
     uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec - t0;
@@ -28,6 +48,7 @@ extern "C" uint64_t rt_timebase(void) {
     return (uint64_t)((__uint128_t)ns * kTimerHz / 1000000000ull);
 #else
     return ns / 1000000000ull * kTimerHz + (ns % 1000000000ull) * kTimerHz / 1000000000ull;
+#endif
 #endif
 }
 

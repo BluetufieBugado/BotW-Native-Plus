@@ -17,10 +17,20 @@ struct GX2PerCoreCBState {
     uint32be* currentWritePtr = nullptr;
     bool isDisplayList = false;
 };
-GX2PerCoreCBState& cb();  // this thread's write target
+extern thread_local GX2PerCoreCBState t_cb;
+inline GX2PerCoreCBState& cb() { return t_cb; }  // this thread's write target
 
 void GX2Command_Flush(uint32 numU32sForNextBuffer, bool triggerMarkerInterrupt = true);
-void GX2ReserveCmdSpace(uint32 reservedFreeSpaceInU32);
+void GX2ReserveCmdSpace_Slow(uint32 reservedFreeSpaceInU32);
+inline void GX2ReserveCmdSpace(uint32 n) {
+    uint32be* wp = t_cb.currentWritePtr;
+    if (__builtin_expect(wp != nullptr, 1)) {
+        uint32 used = (uint32)(wp - t_cb.bufferPtr);
+        uint32 pad = t_cb.isDisplayList ? 0u : 8u;
+        if (__builtin_expect(used + n + pad <= t_cb.bufferSizeInU32s, 1)) return;
+    }
+    GX2ReserveCmdSpace_Slow(n);
+}
 uint64 GX2GetLastSubmittedTimeStamp();
 uint64 GX2GetRetiredTimeStamp();
 bool GX2WaitTimeStamp(uint64 tsWait);
@@ -35,8 +45,20 @@ void GX2Flush();
 extern uint32 sGX2MainCoreIndex;
 }  // namespace GX2
 
-void gx2WriteGather_submitU32AsBE(uint32 v);
-void gx2WriteGather_submitU32AsLE(uint32 v);
+inline void gx2WriteGather_submitU32AsBE(uint32 v) {
+    uint32be* wp = GX2::t_cb.currentWritePtr;
+    if (__builtin_expect(wp != nullptr, 1)) {
+        *wp = v;
+        GX2::t_cb.currentWritePtr = wp + 1;
+    }
+}
+inline void gx2WriteGather_submitU32AsLE(uint32 v) {
+    uint32be* wp = GX2::t_cb.currentWritePtr;
+    if (__builtin_expect(wp != nullptr, 1)) {
+        *(uint32*)wp = v;
+        GX2::t_cb.currentWritePtr = wp + 1;
+    }
+}
 void gx2WriteGather_submitU32AsLEArray(uint32* v, uint32 numValues);
 
 template <typename... Targs>
