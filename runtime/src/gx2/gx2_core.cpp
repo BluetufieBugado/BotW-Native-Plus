@@ -113,13 +113,14 @@ void event_thread() {
     threads::GuestThread* t = threads::adopt_host_thread("GX2 callbacks", 0x10000, 1);
     for (;;) {
         uint32 type;
+        EventCallback cbk;
         {
             std::unique_lock<std::mutex> l(g_ev_lock);
             g_ev_cv.wait(l, [] { return !g_ev_queue.empty(); });
             type = g_ev_queue.front();
             g_ev_queue.pop_front();
+            cbk = g_event_cb[type];
         }
-        EventCallback cbk = g_event_cb[type];
         if (cbk.func) guest_call(&t->ctx, cbk.func, {type, cbk.user});
     }
 }
@@ -254,10 +255,12 @@ void GX2Init(betype<uint32>* args) {
     LOG("GX2Init: command pool %08x size %x, main core %u", base, size, sGX2MainCoreIndex);
     latte::set_event_sink([](latte::Event e) {
         uint32 i = (uint32)e;
-        if (i < 5 && g_event_cb[i].func) {
+        if (i < 5) {
             std::lock_guard<std::mutex> l(g_ev_lock);
-            g_ev_queue.push_back(i);
-            g_ev_cv.notify_one();
+            if (g_event_cb[i].func) {
+                g_ev_queue.push_back(i);
+                g_ev_cv.notify_one();
+            }
         }
     });
     std::thread(event_thread).detach();
@@ -316,12 +319,20 @@ void GX2SetSwapInterval(uint32 v) {
 }
 uint32 GX2GetSwapInterval() { return latte::swap_interval(); }
 void GX2SetEventCallback(uint32 type, MPTR func, MPTR user) {
-    if (type < 5) g_event_cb[type] = {func, user};
+    if (type < 5) {
+        std::lock_guard<std::mutex> l(g_ev_lock);
+        g_event_cb[type] = {func, user};
+    }
 }
 void GX2GetEventCallback(uint32 type, uint32be* func, uint32be* user) {
     if (type >= 5) return;
-    if (func) *func = g_event_cb[type].func;
-    if (user) *user = g_event_cb[type].user;
+    EventCallback cbk;
+    {
+        std::lock_guard<std::mutex> l(g_ev_lock);
+        cbk = g_event_cb[type];
+    }
+    if (func) *func = cbk.func;
+    if (user) *user = cbk.user;
 }
 void GX2SetGPUFence(uint32be* fence, uint32 mask, uint32 compareOp, uint32 value) {
     static const uint8 ops[] = {0x7, 0x1, 0x3, 0x2, 0x6, 0x4, 0x5, 0x0};

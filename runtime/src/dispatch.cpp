@@ -179,12 +179,11 @@ static void trap_unimplemented_thunk(PPCContext* c) {
 // f0..f13, ps1[0..13], cr[0..1], cr[5..7], lr, ctr, xer, fpscr, res_addr/res_val), rather than
 // copying the entire 1080-byte PPCContext on every host->guest callback.
 uint32_t guest_call(PPCContext* c, uint32_t fn, std::initializer_list<uint32_t> args) {
-    uint32_t saved_r0 = c->r[0];
-    uint32_t saved_r5_12[8];
-    memcpy(saved_r5_12, &c->r[5], sizeof(saved_r5_12));
-    double saved_f0 = c->f[0];
-    double saved_f2_13[12];
-    memcpy(saved_f2_13, &c->f[2], sizeof(saved_f2_13));
+    uint32_t saved_r0 = c->r[0], saved_r1 = c->r[1];
+    uint32_t saved_r3_12[10];
+    memcpy(saved_r3_12, &c->r[3], sizeof(saved_r3_12));
+    double saved_f0_13[14];
+    memcpy(saved_f0_13, &c->f[0], sizeof(saved_f0_13));
     double saved_ps1_0_13[14];
     memcpy(saved_ps1_0_13, &c->ps1[0], sizeof(saved_ps1_0_13));
     uint8_t saved_cr_xer[36];
@@ -202,9 +201,9 @@ uint32_t guest_call(PPCContext* c, uint32_t fn, std::initializer_list<uint32_t> 
     uint32_t r = c->r[3];
 
     c->r[0] = saved_r0;
-    memcpy(&c->r[5], saved_r5_12, sizeof(saved_r5_12));
-    c->f[0] = saved_f0;
-    memcpy(&c->f[2], saved_f2_13, sizeof(saved_f2_13));
+    c->r[1] = saved_r1;
+    memcpy(&c->r[3], saved_r3_12, sizeof(saved_r3_12));
+    memcpy(&c->f[0], saved_f0_13, sizeof(saved_f0_13));
     memcpy(&c->ps1[0], saved_ps1_0_13, sizeof(saved_ps1_0_13));
     memcpy(c->cr, saved_cr_xer, sizeof(saved_cr_xer));
     c->lr = saved_lr;

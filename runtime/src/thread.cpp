@@ -105,6 +105,7 @@ void launch(GuestThread* t) {
 #endif
     pthread_t th;
     pthread_create(&th, &attr, [](void* p) -> void* { run_thread((GuestThread*)p); return nullptr; }, t);
+    pthread_attr_destroy(&attr);
     pthread_detach(th);
 }
 }  // namespace

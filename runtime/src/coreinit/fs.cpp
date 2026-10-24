@@ -359,7 +359,9 @@ int32_t get_stat(PPCContext* c, const std::string& raw, uint32_t out, uint32_t m
 }
 
 std::string save_path(uint32_t account, const char* path) {
-    std::string base = account == 0xFF ? "/vol/save/common" : "/vol/save/" + std::to_string(0x80000000u + account);
+    char user[16];
+    snprintf(user, sizeof user, "%08x", 0x80000000u + (account ? account : 1));
+    std::string base = account == 0xFF ? "/vol/save/common" : std::string("/vol/save/") + user;
     std::string p = path ? path : "";
     if (!p.empty() && p[0] != '/') p = "/" + p;
     return base + p;
@@ -394,44 +396,50 @@ HLE_EXPORT(coreinit, FSCloseFile) {
 // FSReadFile(client, block, dst, size, count, handle, flag, err) -> elements read
 HLE_EXPORT(coreinit, FSReadFile) {
     uint32_t dst = ARG(2), size = ARG(3), count = ARG(4);
-    Handle* h;
+    FILE* f = nullptr;
     std::string host;
     {
         std::lock_guard<std::mutex> l(g_fs_lock);
-        h = get(ARG(5));
-        if (h) host = h->host;
+        Handle* h = get(ARG(5));
+        if (h) {
+            f = h->f;
+            if (diag_on() || !f) host = h->host;
+        }
     }
-    if (!h || !h->f) {
+    if (!f) {
         diag_fs(host.c_str(), "FS read bad handle %u", ARG(5));
         RET(FS_FATAL);
         return;
     }
     size_t want = (size_t)size * count;
-    size_t n = read_guest(h->f, dst, want);
-    bool text = host.find("Region") != std::string::npos || host.find(".txt") != std::string::npos;
-    if (diag_on() && (text || n != want || want <= 4096)) {
-        char hex[96];
-        hex[0] = 0;
-        size_t nb = n < 32 ? n : 32;
-        int p = 0;
-        for (size_t i = 0; i < nb && p < (int)sizeof hex - 4; i++)
-            p += snprintf(hex + p, sizeof hex - p, "%02x", mem::r8(dst + (uint32_t)i));
-        diag_fs(host.c_str(), "FS read %s want %zu got %zu [%s]", host.c_str(), want, n, hex);
+    size_t n = read_guest(f, dst, want);
+    if (diag_on()) {
+        bool text = host.find("Region") != std::string::npos || host.find(".txt") != std::string::npos;
+        if (text || n != want || want <= 4096) {
+            char hex[96];
+            hex[0] = 0;
+            size_t nb = n < 32 ? n : 32;
+            int p = 0;
+            for (size_t i = 0; i < nb && p < (int)sizeof hex - 4; i++)
+                p += snprintf(hex + p, sizeof hex - p, "%02x", mem::r8(dst + (uint32_t)i));
+            diag_fs(host.c_str(), "FS read %s want %zu got %zu [%s]", host.c_str(), want, n, hex);
+        }
     }
     RET(size ? (uint32_t)(n / size) : 0);
 }
 HLE_EXPORT(coreinit, FSWriteFile) {
     uint32_t src = ARG(2), size = ARG(3), count = ARG(4);
-    Handle* h;
+    FILE* f = nullptr;
     {
         std::lock_guard<std::mutex> l(g_fs_lock);
-        h = get(ARG(5));
+        Handle* h = get(ARG(5));
+        if (h) f = h->f;
     }
-    if (!h || !h->f) {
+    if (!f) {
         RET(FS_FATAL);
         return;
     }
-    size_t n = write_guest(h->f, src, (size_t)size * count);
+    size_t n = write_guest(f, src, (size_t)size * count);
     RET(size ? (uint32_t)(n / size) : 0);
 }
 HLE_EXPORT(coreinit, FSSetPosFile) {
