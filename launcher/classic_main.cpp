@@ -2715,7 +2715,8 @@ struct SetupWizardWindow : Window {
             bool ok = true;
             if (has_rpx) {
                 std::wstring cmd = L"\"" + py.wstring() + L"\" -I \"" + (repo / "tools" / "recompile.py").wstring() +
-                                   L"\" \"" + rpx_path.wstring() + L"\"";
+                                   L"\" \"" + rpx_path.wstring() + L"\" \"" +
+                                   (repo / "generated").wstring() + L"\"";
                 append_log("> " + narrow(cmd));
                 ok = run_command_piped(cmd, repo, env);
             } else {
