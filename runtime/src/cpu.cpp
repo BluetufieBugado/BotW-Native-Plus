@@ -20,23 +20,29 @@ static constexpr uint64_t kTimerHz = 62156250;
 
 extern "C" uint64_t rt_timebase(void) {
 #if defined(_WIN32)
-    static const uint64_t freq = []() -> uint64_t {
-        LARGE_INTEGER f{};
+    struct WinTimebase {
+        uint64_t freq;
+        uint64_t qpc0;
+        bool is_10mhz;
+    };
+    static const WinTimebase tb = []() -> WinTimebase {
+        LARGE_INTEGER f{}, c{};
         QueryPerformanceFrequency(&f);
-        return (uint64_t)f.QuadPart;
-    }();
-    static const uint64_t qpc0 = []() -> uint64_t {
-        LARGE_INTEGER c{};
         QueryPerformanceCounter(&c);
-        return (uint64_t)c.QuadPart;
+        uint64_t fq = (uint64_t)f.QuadPart;
+        return {fq, (uint64_t)c.QuadPart, fq == 10000000ull};
     }();
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
-    uint64_t ticks = (uint64_t)now.QuadPart - qpc0;
+    uint64_t ticks = (uint64_t)now.QuadPart - tb.qpc0;
+    if (__builtin_expect(tb.is_10mhz, 1)) {
+        // 62156250 / 10000000 = 1989 / 320. Avoids 128-bit software __udivti3 call.
+        return (ticks * 1989ull) / 320ull;
+    }
 #if defined(__SIZEOF_INT128__)
-    return (uint64_t)((__uint128_t)ticks * kTimerHz / freq);
+    return (uint64_t)((__uint128_t)ticks * kTimerHz / tb.freq);
 #else
-    return ticks / freq * kTimerHz + (ticks % freq) * kTimerHz / freq;
+    return ticks / tb.freq * kTimerHz + (ticks % tb.freq) * kTimerHz / tb.freq;
 #endif
 #else
     struct timespec ts{};

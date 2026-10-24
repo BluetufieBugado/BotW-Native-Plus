@@ -301,7 +301,36 @@ HLE_EXPORT(coreinit, __ghs_mtx_dst) {}
 HLE_EXPORT(coreinit, __ghs_mtx_lock) { mutex_lock(c, ARG(0)); }
 HLE_EXPORT(coreinit, __ghs_mtx_unlock) { mutex_unlock(c, ARG(0)); }
 
-// ---- events: +0x0C value, +0x20 mode (0 manual reset, 1 auto reset) ----------------------
+// ---- events: +0x0C value, +0x10 waiter count (host), +0x20 mode (0 manual, 1 auto) --------
+namespace {
+constexpr uint32_t kBeOne = 0x01000000u;
+
+struct EventWaiterScope {
+    uint32_t* wptr;
+    EventWaiterScope(uint32_t e) : wptr((uint32_t*)(g_mem + e + 0x10)) {
+        __atomic_add_fetch(wptr, 1u, __ATOMIC_SEQ_CST);
+    }
+    ~EventWaiterScope() {
+        __atomic_sub_fetch(wptr, 1u, __ATOMIC_SEQ_CST);
+    }
+};
+
+inline bool event_try_consume(uint32_t e) {
+    uint32_t* val_ptr = (uint32_t*)(g_mem + e + 0x0C);
+    uint32_t v = __atomic_load_n(val_ptr, __ATOMIC_ACQUIRE);
+    if (!v) return false;
+    uint32_t mode = *(const uint32_t*)(g_mem + e + 0x20);
+    if (mode != kBeOne) return true;
+    return __atomic_exchange_n(val_ptr, 0u, __ATOMIC_ACQ_REL) != 0u;
+}
+
+__attribute__((noinline)) void event_signal_wake(uint32_t e, uint32_t mode) {
+    std::lock_guard<std::mutex> l(g_klock);
+    if (mode == kBeOne) notify_one_if_waiting(e);
+    else notify_all_if_waiting(e);
+}
+}  // namespace
+
 HLE_EXPORT(coreinit, OSInitEvent) {
     uint32_t e = ARG(0);
     mem::commit(e, 0x24, true);
@@ -312,59 +341,70 @@ HLE_EXPORT(coreinit, OSInitEvent) {
 }
 HLE_EXPORT(coreinit, OSSignalEvent) {
     uint32_t e = ARG(0);
-    std::lock_guard<std::mutex> l(g_klock);
-    mem::w32(e + 0x0C, 1);
-    if (mem::r32(e + 0x20) == 1) notify_one_if_waiting(e);
-    else notify_all_if_waiting(e);
+    uint32_t* val_ptr = (uint32_t*)(g_mem + e + 0x0C);
+    uint32_t* wait_ptr = (uint32_t*)(g_mem + e + 0x10);
+    __atomic_store_n(val_ptr, kBeOne, __ATOMIC_SEQ_CST);
+    if (__builtin_expect(__atomic_load_n(wait_ptr, __ATOMIC_SEQ_CST) != 0u, 0)) {
+        event_signal_wake(e, *(const uint32_t*)(g_mem + e + 0x20));
+    }
 }
 HLE_EXPORT(coreinit, OSResetEvent) {
-    std::lock_guard<std::mutex> l(g_klock);
-    mem::w32(ARG(0) + 0x0C, 0);
+    uint32_t* val_ptr = (uint32_t*)(g_mem + ARG(0) + 0x0C);
+    __atomic_store_n(val_ptr, 0u, __ATOMIC_SEQ_CST);
 }
 HLE_EXPORT(coreinit, OSWaitEvent) {
     uint32_t e = ARG(0);
+    if (__builtin_expect(event_try_consume(e), 1)) return;
     threads::CoreHandoff handoff;
     std::unique_lock<std::mutex> l(g_klock);
-    if (mem::r32(e + 0x0C) == 0) {
+    if (!event_try_consume(e)) {
         diag_sync("event wait %08x mode %u (clear)", e, mem::r32(e + 0x20));
         l.unlock();
         handoff.yield();
         l.lock();
-        if (mem::r32(e + 0x0C) == 0) {
+        if (!event_try_consume(e)) {
             threads::WaitMark w("event", e);
             SyncCV& scv = g_cvs.get(e);
             WaiterScope ws(scv.waiters);
-            scv.cv.wait(l, [&] { return mem::r32(e + 0x0C) != 0; });
+            EventWaiterScope ews(e);
+            scv.cv.wait(l, [&] { return event_try_consume(e); });
         }
         diag_sync("event wake %08x value %u", e, mem::r32(e + 0x0C));
     }
-    if (mem::r32(e + 0x20) == 1) mem::w32(e + 0x0C, 0);
 }
 // BOOL OSWaitEventWithTimeout(OSEvent*, OSTime timeout_ns)
 HLE_EXPORT(coreinit, OSWaitEventWithTimeout) {
     uint32_t e = ARG(0);
+    if (__builtin_expect(event_try_consume(e), 1)) {
+        RET(1);
+        return;
+    }
     // Cafe passes OSTime ticks. This runtime has always treated the value as
     // nanoseconds (see the historical comment); keep that so a timed wait does
     // not get 16x longer on the platforms that already boot.
     uint64_t ns = ARG64(2);
+    if (ns == 0) {
+        RET(0);
+        return;
+    }
     threads::CoreHandoff handoff;
     std::unique_lock<std::mutex> l(g_klock);
-    bool ok = mem::r32(e + 0x0C) != 0;
+    bool ok = event_try_consume(e);
     if (!ok) {
         diag_sync("event timeout %08x raw %llu treated as ns", e, (unsigned long long)ns);
         l.unlock();
         handoff.yield();
         l.lock();
-        ok = mem::r32(e + 0x0C) != 0;
+        ok = event_try_consume(e);
         if (!ok) {
             threads::WaitMark w("event/timeout", e);
             SyncCV& scv = g_cvs.get(e);
             WaiterScope ws(scv.waiters);
-            ok = scv.cv.wait_for(l, std::chrono::nanoseconds(ns), [&] { return mem::r32(e + 0x0C) != 0; });
+            EventWaiterScope ews(e);
+            ok = scv.cv.wait_for(l, std::chrono::nanoseconds(ns), [&] { return event_try_consume(e); });
         }
         diag_sync("event timeout %08x -> %d", e, (int)ok);
     }
-    if (ok && mem::r32(e + 0x20) == 1) mem::w32(e + 0x0C, 0);
     RET(ok);
 }
 
