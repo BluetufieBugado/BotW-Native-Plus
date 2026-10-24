@@ -17,6 +17,7 @@
 #include <shobjidl.h>
 #include <tlhelp32.h>
 
+#include "game_build.h"
 #include "game_info.h"
 #include "mods.h"
 #include "setup_wizard.h"
@@ -39,8 +40,8 @@ const COLORREF kOk = RGB(40, 110, 60);
 const COLORREF kBad = RGB(160, 50, 40);
 
 enum : UINT { WM_MERGE_PROGRESS = WM_APP + 1, WM_MERGE_DONE };
-enum Step { S_WELCOME, S_GAME, S_USER, S_PAD, S_GFX, S_MODS, S_READY, S_COUNT };
-const wchar_t* kStepNames[S_COUNT] = {L"Welcome", L"Game files", L"Saves folder", L"Controller",
+enum Step { S_WELCOME, S_GAME, S_BUILD, S_USER, S_PAD, S_GFX, S_MODS, S_READY, S_COUNT };
+const wchar_t* kStepNames[S_COUNT] = {L"Welcome", L"Game files", L"Build the game", L"Saves folder", L"Controller",
                                       L"Graphics", L"Mods (optional)", L"Ready"};
 
 enum Id {
@@ -48,10 +49,11 @@ enum Id {
     ID_LAYOUT, ID_GYRO, ID_SCALE, ID_FPS, ID_FULLSCREEN, ID_MOD_ADD, ID_MOD_ADDDIR,
     ID_PLAY, ID_MODS, ID_SETTINGS, ID_OPEN_GAME, ID_OPEN_USER, ID_OPEN_LOG, ID_CLASSIC,
     ID_MODLIST, ID_MODSAVE, ID_GAME_EDIT, ID_USER_EDIT,
+    ID_SRC_EDIT, ID_SRC_BROWSE, ID_TC_INSTALL, ID_TC_LINK, ID_TC_RECHECK, ID_PREBUILT, ID_BUILD, ID_BUILD_STOP,
 };
 
 struct Config {
-    std::wstring game, exe, user, seconds = L"0", theme;
+    std::wstring game, exe, user, seconds = L"0", theme, source, build_state;
     bool fullscreen = false, gamepad_view = false, no_mods = false, setup_done = false;
     std::vector<std::string> other;
 };
@@ -74,6 +76,12 @@ struct App {
     HWND pad_list{}, layout{}, gyro{};
     HWND gfx_note{}, scale{}, fps{}, fullscreen{};
     HWND mod_note{};
+    HWND src_edit{}, tc_rows{}, prebuilt{}, build_btn{}, stop_btn{}, bstage{}, bbar{}, belapsed{}, blog{}, bjobs{};
+    gamebuild::Toolchain tc;
+    gamebuild::Runner runner;
+    bool build_ok = false, dry_run = false, was_running = false;
+    ULONGLONG build_t0 = 0;
+    HFONT mono{};
     HWND ready_text{};
     // main screen widgets
     std::vector<HWND> main_ctl;
@@ -147,6 +155,8 @@ void load_ini() {
         else if (k == "no_mods") c.no_mods = v == "1";
         else if (k == "setup_done") c.setup_done = v == "1";
         else if (k == "theme") c.theme = widen(v);
+        else if (k == "source") c.source = widen(v);
+        else if (k == "build_state") c.build_state = widen(v);
         else c.other.push_back(line);
     }
     if (c.exe.empty() || !is_file(c.exe)) {
@@ -169,6 +179,8 @@ void save_ini() {
     line("no_mods", A.cfg.no_mods ? L"1" : L"0");
     line("setup_done", A.cfg.setup_done ? L"1" : L"0");
     line("theme", A.cfg.theme);
+    line("source", A.cfg.source);
+    line("build_state", A.cfg.build_state);
     for (auto& l : A.cfg.other) out << l << "\n";
 }
 
@@ -299,6 +311,9 @@ const wchar_t* kHelp[S_COUNT] = {
     L"v1.5.0 update (title version 208). The DLC is optional. You can pick one folder that already has "
     L"both merged (it contains code, content and meta), or a parent folder that holds the separate Base, "
     L"Update and DLC dumps - they will be found automatically.",
+    L"First setup only. The game code is recompiled from your own U-King.rpx and compiled on this PC, once - "
+    L"usually 30 to 60 minutes with every CPU core busy. You can stop at any time: finished parts are kept and "
+    L"Build continues where it stopped. Later launches skip this.",
     L"Saves, controls.ini, settings, mods and the log are kept in this folder. The default is fine for most "
     L"people. If you already have saves from an earlier setup, point this at that folder to keep using them.",
     L"Plug in or pair a controller now if you want to use one; it shows up below within a second. "
@@ -316,9 +331,9 @@ void build_wizard() {
         A.steps[i] = mk(L"STATIC", kStepNames[i], SS_LEFT | SS_NOTIFY, 20, y, 150, 22);
     A.head = mk(L"STATIC", L"", SS_LEFT, 200, 16, 500, 30, 0, A.title);
     A.help = mk(L"STATIC", L"", SS_LEFT, 200, 52, 500, 96);
-    A.status = mk(L"STATIC", L"", SS_LEFT, 200, 382, 500, 40);
-    A.back = mk(L"BUTTON", L"< Back", BS_PUSHBUTTON | WS_TABSTOP, 500, 432, 96, 28, ID_BACK);
-    A.next = mk(L"BUTTON", L"Next >", BS_DEFPUSHBUTTON | WS_TABSTOP, 604, 432, 96, 28, ID_NEXT);
+    A.status = mk(L"STATIC", L"", SS_LEFT, 200, 462, 500, 40);
+    A.back = mk(L"BUTTON", L"< Back", BS_PUSHBUTTON | WS_TABSTOP, 500, 512, 96, 28, ID_BACK);
+    A.next = mk(L"BUTTON", L"Next >", BS_DEFPUSHBUTTON | WS_TABSTOP, 604, 512, 96, 28, ID_NEXT);
 
     const int X = 200, W = 500;
     // welcome
@@ -329,6 +344,25 @@ void build_wizard() {
     A.game_browse = on_page(S_GAME, mk(L"BUTTON", L"Browse...", BS_PUSHBUTTON | WS_TABSTOP, X + W - 96, 181, 96, 26, ID_GAME_BROWSE));
     A.game_rows = label(S_GAME, L"", X, 216, W, 120);
     A.game_merge = on_page(S_GAME, mk(L"BUTTON", L"Combine into one game folder...", BS_PUSHBUTTON | WS_TABSTOP, X, 340, 240, 28, ID_GAME_MERGE));
+    // build
+    label(S_BUILD, L"Source folder:", X, 156, 96, 20);
+    A.src_edit = on_page(S_BUILD, mk(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, X + 100, 152, W - 204, 24, ID_SRC_EDIT));
+    on_page(S_BUILD, mk(L"BUTTON", L"Browse...", BS_PUSHBUTTON | WS_TABSTOP, X + W - 96, 151, 96, 26, ID_SRC_BROWSE));
+    A.tc_rows = label(S_BUILD, L"", X, 184, W, 52);
+    on_page(S_BUILD, mk(L"BUTTON", L"Install build tools...", BS_PUSHBUTTON | WS_TABSTOP, X, 238, 150, 26, ID_TC_INSTALL));
+    on_page(S_BUILD, mk(L"BUTTON", L"MSYS2 website", BS_PUSHBUTTON | WS_TABSTOP, X + 158, 238, 110, 26, ID_TC_LINK));
+    on_page(S_BUILD, mk(L"BUTTON", L"Check again", BS_PUSHBUTTON | WS_TABSTOP, X + 276, 238, 100, 26, ID_TC_RECHECK));
+    A.prebuilt = on_page(S_BUILD, mk(L"BUTTON", L"Use the game program that is already here (skip building)", BS_AUTOCHECKBOX | WS_TABSTOP, X, 272, W, 22, ID_PREBUILT));
+    A.bjobs = label(S_BUILD, L"", X, 298, W, 20);
+    A.build_btn = on_page(S_BUILD, mk(L"BUTTON", L"Build game", BS_PUSHBUTTON | WS_TABSTOP, X, 322, 120, 28, ID_BUILD));
+    A.stop_btn = on_page(S_BUILD, mk(L"BUTTON", L"Stop", BS_PUSHBUTTON | WS_TABSTOP, X + 128, 322, 80, 28, ID_BUILD_STOP));
+    A.bstage = label(S_BUILD, L"", X + 220, 320, W - 220, 34);
+    A.bbar = on_page(S_BUILD, mk(PROGRESS_CLASSW, L"", PBS_SMOOTH, X, 358, W - 90, 14));
+    SendMessageW(A.bbar, PBM_SETRANGE32, 0, 1000);
+    SendMessageW(A.bbar, PBM_SETBARCOLOR, 0, kAccent);
+    A.belapsed = label(S_BUILD, L"", X + W - 82, 356, 82, 20);
+    A.blog = on_page(S_BUILD, mk(L"EDIT", L"", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, X, 378, W, 78, 0, A.mono));
+    SendMessageW(A.blog, EM_SETLIMITTEXT, 0, 0);
     // user
     label(S_USER, L"Saves folder:", X, 160, 120, 20);
     A.user_edit = on_page(S_USER, mk(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, X, 182, W - 104, 24, ID_USER_EDIT));
@@ -536,9 +570,128 @@ std::wstring welcome_text() {
     std::wstring s = L"You will need:\r\n"
                      L"    - your own dump of Breath of the Wild (USA) with the v1.5.0 update\r\n"
                      L"    - optionally the DLC and any mods you want\r\n\r\nChecking this install:\r\n";
-    s += L"    " + mark(exe) + (exe ? L"Game program found (BotWRecomp.exe)" : L"BotWRecomp.exe not found next to this launcher") + L"\r\n";
+    s += L"    " + mark(exe) + (exe ? L"Game program found (BotWRecomp.exe)" : L"Game program not built yet - setup builds it for you") + L"\r\n";
     s += L"    " + mark(vk) + (vk ? L"Vulkan graphics driver found" : L"Vulkan not found - update your graphics driver") + L"\r\n";
     return s;
+}
+
+// ---------- build step ----------
+fs::path install_exe() { return exe_dir() / L"BotWRecomp.exe"; }
+bool prebuilt_present() { return is_file(install_exe()) && is_file(exe_dir() / L"SDL3.dll"); }
+
+void refresh_build_page() {
+    A.tc = gamebuild::detect_toolchain();
+    std::wstring src = text_of(A.src_edit);
+    bool src_ok = gamebuild::is_source_dir(src);
+    std::wstring rows;
+    rows += mark(src_ok) + (src_ok ? L"Source found (tools\\recompile.py, CMakeLists.txt)" : L"Choose the BotW-Native source folder") + L"\r\n";
+    rows += mark(!A.tc.ucrt_bin.empty()) + (A.tc.ucrt_bin.empty() ? std::wstring(L"MSYS2 not found") : L"MSYS2 UCRT64: " + A.tc.ucrt_bin.wstring()) + L"\r\n";
+    rows += mark(A.tc.ready()) + L"Tools:  g++ " + (A.tc.gxx ? L"yes" : L"missing") + L",  cmake " + (A.tc.cmake ? L"yes" : L"missing") +
+            L",  ninja " + (A.tc.ninja ? L"yes" : L"missing") + L",  python " + (A.tc.python ? L"yes" : L"missing");
+    SetWindowTextW(A.tc_rows, rows.c_str());
+    int cores = 0;
+    double gb = 0;
+    int jobs = gamebuild::auto_jobs(&cores, &gb);
+    wchar_t jl[160];
+    swprintf(jl, 160, L"Will compile %d files at a time (this PC: %d threads, %.0f GB memory).%ls", jobs, cores, gb, A.dry_run ? L"  [dry run]" : L"");
+    SetWindowTextW(A.bjobs, jl);
+    bool pre = prebuilt_present();
+    ShowWindow(A.prebuilt, (A.step == S_BUILD && pre && !A.cfg.setup_done) ? SW_SHOW : SW_HIDE);
+    bool busy = A.runner.running();
+    EnableWindow(A.build_btn, !busy && src_ok && A.tc.ready());
+    EnableWindow(A.stop_btn, busy);
+    SetWindowTextW(A.build_btn, A.cfg.setup_done ? L"Rebuild game" : (A.cfg.build_state == L"stopped" || A.cfg.build_state == L"failed" ? L"Continue build" : L"Build game"));
+    if (busy) return;
+    if (A.build_ok) set_status(L"The game is built and installed. Press Next.", kOk);
+    else if (A.cfg.setup_done) set_status(pre ? L"The game is already built - press Next. Use Rebuild game only after updating the source." : L"BotWRecomp.exe is missing - press Rebuild game.", pre ? kOk : kBad);
+    else if (pre && SendMessageW(A.prebuilt, BM_GETCHECK, 0, 0) == BST_CHECKED) set_status(L"The existing game program will be used. Press Next.", kOk);
+    else if (!src_ok) set_status(L"Choose the source folder (it holds tools and CMakeLists.txt).", kBad);
+    else if (!A.tc.ready()) set_status(L"Build tools are missing. Press Install build tools, wait for the window to finish, then Check again.", kBad);
+    else if (A.cfg.build_state == L"stopped" || A.cfg.build_state == L"failed") set_status(L"An earlier build did not finish. Press Continue build - finished parts are kept.", kAccent);
+    else set_status(L"Ready to build. Press Build game and leave the PC to it.", kAccent);
+}
+
+bool build_step_ok() {
+    if (A.build_ok) return true;
+    if (A.runner.running()) return false;
+    if (A.cfg.setup_done) return prebuilt_present();
+    return prebuilt_present() && SendMessageW(A.prebuilt, BM_GETCHECK, 0, 0) == BST_CHECKED;
+}
+
+void install_tools() {
+    // Guided install: MSYS2 via winget if needed, then the UCRT64 packages from README.md.
+    std::wstring root = A.tc.msys_root.empty() ? L"C:\\msys64" : A.tc.msys_root.wstring();
+    std::wstring cmd = L"/k echo Installing the BotW-Native build tools (MSYS2 UCRT64). This can take a while. && ";
+    if (A.tc.msys_root.empty()) cmd += L"winget install -e --id MSYS2.MSYS2 --accept-source-agreements --accept-package-agreements && ";
+    cmd += L"\"" + root + L"\\usr\\bin\\bash.exe\" -lc \"pacman -Sy --needed --noconfirm " + std::wstring(gamebuild::pacman_packages()) +
+           L"\" && echo. && echo Done. Close this window and press Check again in the launcher.";
+    ShellExecuteW(A.wnd, L"open", L"cmd.exe", cmd.c_str(), nullptr, SW_SHOWNORMAL);
+    set_status(L"A window is installing the tools. When it says Done, press Check again.", kAccent);
+}
+
+void start_build() {
+    gamebuild::Options o;
+    o.source = text_of(A.src_edit);
+    o.rpx = fs::path(A.cfg.game) / L"code" / L"U-King.rpx";
+    o.install_dir = exe_dir();
+    o.tc = A.tc;
+    o.jobs = gamebuild::auto_jobs();
+    o.dry_run = A.dry_run;
+    A.cfg.source = o.source.wstring();
+    if (!A.dry_run) { A.cfg.build_state = L"stopped"; save_ini(); }
+    A.build_ok = false;
+    SetWindowTextW(A.blog, L"");
+    A.build_t0 = GetTickCount64();
+    A.runner.start(o);
+    A.was_running = true;
+    EnableWindow(A.back, FALSE);
+    EnableWindow(A.next, FALSE);
+    SetTimer(A.wnd, 2, 250, nullptr);
+    refresh_build_page();
+}
+
+void tick_build() {
+    std::string add = A.runner.take_log();
+    if (!add.empty()) {
+        int len = GetWindowTextLengthW(A.blog);
+        if (len > 400000) { SendMessageW(A.blog, EM_SETSEL, 0, len - 200000); SendMessageW(A.blog, EM_REPLACESEL, FALSE, (LPARAM)L""); len = GetWindowTextLengthW(A.blog); }
+        SendMessageW(A.blog, EM_SETSEL, len, len);
+        SendMessageW(A.blog, EM_REPLACESEL, FALSE, (LPARAM)widen(add).c_str());
+    }
+    gamebuild::Stage st = A.runner.stage();
+    static const int weight[] = {0, 2, 30, 3, 63, 2};  // per-stage share of the bar, in percent
+    int idx = gamebuild::stage_index(st), overall = 0;
+    for (int i = 1; i < idx; i++) overall += weight[i] * 10;
+    if (idx) overall += weight[idx] * A.runner.percent() / 10;
+    if (st == gamebuild::Stage::Done) overall = 1000;
+    SendMessageW(A.bbar, PBM_SETPOS, overall, 0);
+    std::wstring lab = idx ? L"Step " + std::to_wstring(idx) + L" of " + std::to_wstring(gamebuild::kStageCount) + L": " + gamebuild::stage_name(st)
+                           : std::wstring(gamebuild::stage_name(st));
+    std::string det = A.runner.detail();
+    if ((st == gamebuild::Stage::Recompile || st == gamebuild::Stage::Compile) && !det.empty()) lab += L"\r\n" + widen(det) + L"  (" + std::to_wstring(A.runner.percent()) + L"%)";
+    SetWindowTextW(A.bstage, lab.c_str());
+    ULONGLONG sec = (GetTickCount64() - A.build_t0) / 1000;
+    wchar_t el[32];
+    swprintf(el, 32, L"%llu:%02llu:%02llu", sec / 3600, (sec / 60) % 60, sec % 60);
+    SetWindowTextW(A.belapsed, el);
+    if (A.runner.running()) { set_status(L"Building... you can keep using the PC, but it will be slow.", kAccent); return; }
+    // finished
+    KillTimer(A.wnd, 2);
+    RedrawWindow(A.wnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    A.was_running = false;
+    EnableWindow(A.back, TRUE);
+    EnableWindow(A.next, TRUE);
+    if (st == gamebuild::Stage::Done) {
+        A.build_ok = !A.dry_run;
+        if (!A.dry_run) { A.cfg.exe = install_exe().wstring(); A.cfg.build_state = L"done"; save_ini(); }
+        refresh_build_page();
+        set_status(A.dry_run ? L"Dry run finished - every step ran without compiling anything." : L"The game is built and installed. Press Next.", kOk);
+        return;
+    }
+    if (!A.dry_run) { A.cfg.build_state = st == gamebuild::Stage::Cancelled ? L"stopped" : L"failed"; save_ini(); }
+    refresh_build_page();
+    if (st == gamebuild::Stage::Cancelled) set_status(L"Stopped. Press Continue build to pick up where it left off.", kAccent);
+    else set_status(L"Build failed: " + widen(A.runner.error()), kBad);
 }
 
 // ---------- navigation ----------
@@ -549,6 +702,7 @@ void show_mode() {
     }
     for (HWND h : {A.head, A.help, A.status, A.back, A.next}) ShowWindow(h, A.wizard ? SW_SHOW : SW_HIDE);
     if (A.wizard && A.step == S_GAME) check_game();  // re-hide merge button as needed
+    if (A.wizard && A.step == S_BUILD) refresh_build_page();
     for (HWND h : A.main_ctl) ShowWindow(h, A.wizard ? SW_HIDE : SW_SHOW);
     InvalidateRect(A.wnd, nullptr, TRUE);
 }
@@ -568,6 +722,13 @@ void enter_step(int s) {
     switch (s) {
     case S_WELCOME: SetWindowTextW(A.page[S_WELCOME][0], welcome_text().c_str()); set_status(L"Press Next to begin."); break;
     case S_GAME: SetWindowTextW(A.game_edit, A.cfg.game.c_str()); break;
+    case S_BUILD: {
+        std::wstring src = A.cfg.source;
+        if (!gamebuild::is_source_dir(src)) src = gamebuild::find_source(exe_dir()).wstring();
+        SetWindowTextW(A.src_edit, src.c_str());
+        refresh_build_page();
+        break;
+    }
     case S_USER: SetWindowTextW(A.user_edit, A.cfg.user.c_str()); check_user(); break;
     case S_PAD:
         SendMessageW(A.layout, CB_SETCURSEL, A.prefs.layout == -1 ? 0 : (A.prefs.layout == 1 ? 1 : 2), 0);
@@ -625,6 +786,10 @@ void go_next() {
     case S_GAME:
         check_game();
         if (!A.game_ok) { MessageBeep(MB_ICONWARNING); return; }
+        break;
+    case S_BUILD:
+        if (!build_step_ok()) { MessageBeep(MB_ICONWARNING); refresh_build_page(); return; }
+        if (!A.build_ok && prebuilt_present()) A.cfg.exe = install_exe().wstring();
         break;
     case S_USER:
         if (!check_user()) { MessageBeep(MB_ICONWARNING); return; }
@@ -765,6 +930,11 @@ void show_mods() {
     EnableWindow(A.wnd, FALSE);
 }
 
+int ask_rebuild(HWND w) {
+    return MessageBoxW(w, L"Rebuild the game from the source folder? This recompiles and compiles everything that changed "
+                          L"and can take a long time. The current game program is kept as BotWRecomp.old.exe.", kTitle, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+}
+
 // ---------- main window ----------
 LRESULT CALLBACK wnd_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
@@ -785,18 +955,18 @@ LRESULT CALLBACK wnd_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(w, &ps);
         if (A.wizard) {
-            RECT side{0, 0, 180, 480};
+            RECT side{0, 0, 180, 560};
             HBRUSH b = CreateSolidBrush(RGB(244, 245, 247));
             FillRect(dc, &side, b);
             DeleteObject(b);
-            RECT bar{180, 0, 181, 480};
+            RECT bar{180, 0, 181, 560};
             HBRUSH l = CreateSolidBrush(RGB(220, 222, 226));
             FillRect(dc, &bar, l);
             RECT sel{14, 20 + A.step * 28, 17, 20 + A.step * 28 + 20};
             HBRUSH a = CreateSolidBrush(kAccent);
             FillRect(dc, &sel, a);
             DeleteObject(a);
-            RECT line{200, 420, 700, 421};
+            RECT line{200, 500, 700, 501};
             FillRect(dc, &line, l);
             DeleteObject(l);
         }
@@ -804,6 +974,7 @@ LRESULT CALLBACK wnd_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TIMER:
+        if (wp == 2) { tick_build(); return 0; }
         if (A.wizard && A.step == S_PAD) refresh_pads();
         if (!A.wizard && !g_mods_wnd) {
             bool run = process_running(L"BotWRecomp.exe");
@@ -836,6 +1007,21 @@ LRESULT CALLBACK wnd_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
         case ID_GAME_EDIT: if (HIWORD(wp) == EN_KILLFOCUS) check_game(); break;
         case ID_USER_EDIT: if (HIWORD(wp) == EN_KILLFOCUS) check_user(); break;
         case ID_GAME_MERGE: start_merge(); break;
+        case ID_SRC_BROWSE: {
+            auto p = pick_folder(w, L"Choose the BotW-Native source folder", text_of(A.src_edit));
+            if (!p.empty()) SetWindowTextW(A.src_edit, p.c_str());
+            refresh_build_page();
+            break;
+        }
+        case ID_SRC_EDIT: if (HIWORD(wp) == EN_KILLFOCUS) refresh_build_page(); break;
+        case ID_TC_RECHECK: case ID_PREBUILT: refresh_build_page(); break;
+        case ID_TC_INSTALL: install_tools(); break;
+        case ID_TC_LINK: ShellExecuteW(w, L"open", L"https://www.msys2.org/", nullptr, nullptr, SW_SHOWNORMAL); break;
+        case ID_BUILD:
+            if (A.cfg.setup_done && ask_rebuild(w) != IDYES) break;
+            start_build();
+            break;
+        case ID_BUILD_STOP: A.runner.cancel(); break;
         case ID_USER_BROWSE: {
             auto p = pick_folder(w, L"Choose the saves folder", text_of(A.user_edit));
             if (!p.empty()) { SetWindowTextW(A.user_edit, p.c_str()); check_user(); }
@@ -861,6 +1047,12 @@ LRESULT CALLBACK wnd_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_CLOSE:
         if (A.merging) return 0;
+        if (A.runner.running()) {
+            if (MessageBoxW(w, L"Stop the build and close? Finished parts are kept and the next start continues from there.", kTitle, MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
+            A.runner.cancel();
+            A.cfg.build_state = L"stopped";
+            save_ini();
+        }
         DestroyWindow(w);
         return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
@@ -874,7 +1066,7 @@ static int run(HINSTANCE inst, int show) {
     A.inst = inst;
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    INITCOMMONCONTROLSEX icc{sizeof icc, ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES};
+    INITCOMMONCONTROLSEX icc{sizeof icc, ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS};
     InitCommonControlsEx(&icc);
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     A.sdl_ok = SDL_Init(SDL_INIT_GAMEPAD);
@@ -888,6 +1080,7 @@ static int run(HINSTANCE inst, int show) {
     lf.lfHeight = lf.lfHeight * 3 / 2;
     A.title = CreateFontIndirectW(&lf);
     A.white = GetSysColorBrush(COLOR_WINDOW);
+    A.mono = CreateFontW(-12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, FIXED_PITCH, L"Consolas");
     A.side = CreateSolidBrush(RGB(244, 245, 247));
 
     WNDCLASSW wc{};
@@ -906,15 +1099,23 @@ static int run(HINSTANCE inst, int show) {
     A.prefs = setupwizard::read_game_prefs(fs::path(A.cfg.user));
     bool ready = A.cfg.setup_done && is_file(fs::path(A.cfg.game) / "code" / "U-King.rpx");
     A.wizard = !ready;
+    // Developer check of the build step: runs every stage without compiling or installing.
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        for (int i = 1; argv && i < argc; i++) if (wcscmp(argv[i], L"--dry-run-build") == 0) A.dry_run = true;
+        if (argv) LocalFree(argv);
+    }
 
-    RECT r{0, 0, 720, 480};
-    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    RECT r{0, 0, 720, 560};
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     AdjustWindowRect(&r, style, FALSE);
     A.wnd = CreateWindowExW(0, L"BotWNativeLauncher", kTitle, style, CW_USEDEFAULT, CW_USEDEFAULT,
                             r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);
     build_wizard();
     build_main();
-    if (A.wizard) enter_step(S_WELCOME);
+    if (A.dry_run) { A.wizard = true; enter_step(S_BUILD); if (IsWindowEnabled(A.build_btn)) start_build(); }
+    else if (A.wizard) enter_step(S_WELCOME);
     else { show_mode(); refresh_main(); }
     SetTimer(A.wnd, 1, 700, nullptr);
     ShowWindow(A.wnd, show);

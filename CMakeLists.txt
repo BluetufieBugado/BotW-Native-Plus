@@ -320,6 +320,7 @@ if(WIN32)
   # BotWLauncher: guided first-run setup, then Play / Mods / Settings.
   add_executable(BotWLauncher WIN32
     launcher/main.cpp
+    launcher/game_build.cpp
     launcher/game_info.cpp
     launcher/mods.cpp
     launcher/setup_wizard.cpp
