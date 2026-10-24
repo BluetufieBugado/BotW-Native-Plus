@@ -13,9 +13,12 @@ void run();                      // event loop; returns when the app should quit
 void drawable_size(int* w, int* h);
 // Pixel size of the display the window is on (for the automatic render scale).
 void display_pixel_size(int* w, int* h);
-void set_gyro(bool on);  // controller gyro -> GamePad motion (default on)
+void set_fullscreen(bool on);  // --fullscreen: start in borderless fullscreen (F11 toggles)
+void set_gyro(bool on);        // controller gyro -> GamePad motion (default on)
 void set_rumble(bool on);
-void set_layout(int layout);  // 0: A = right face button (Nintendo positions), 1: A = bottom face button
+// -1: automatic (Nintendo layout on Switch controllers, labels on Xbox/PlayStation),
+//  0: A = right face button (Nintendo positions), 1: A = bottom face button.
+void set_layout(int layout);
 void set_script(const std::string& s);  // "F:key:NAME,F:hold:NAME:frames,F:stick:l:x:y:frames,F:quit"
 void on_frame(uint64_t frame);   // called by the renderer after each presented frame
 bool quit_requested();

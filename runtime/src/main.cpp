@@ -153,6 +153,7 @@ int main(int argc, char** argv) {
         if (a == "--game" && i + 1 < argc) g_game_root = argv[++i];
         else if (a == "--trace") g_log_level = 1;
         else if (a == "--headless") g_headless = true;
+        else if (a == "--fullscreen") window::set_fullscreen(true);
         else if (a == "--mute") g_mute = true;
         else if (a == "--capture" && i + 1 < argc) capture_every = atoi(argv[++i]);
         else if (a == "--script" && i + 1 < argc) window::set_script(argv[++i]);
