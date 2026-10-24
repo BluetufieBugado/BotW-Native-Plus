@@ -28,10 +28,15 @@ std::string key(const char* lib, const char* name) { return std::string(lib) + "
 
 GuestFn* g_text_table = nullptr;  // (addr - kText) >> 2
 uint32_t g_text_end = 0;
+uint32_t g_text_span = 0;
 std::shared_mutex g_lock;
 GuestFn g_thunks[mem::kThunkSize / 4];
 const char* g_thunk_names[mem::kThunkSize / 4];
 uint32_t g_next_thunk = 0;
+// RPX import stubs live at 0xC0000000+; cover 1 MB (262,144 entries) with a flat O(1) table.
+constexpr uint32_t kStubBase = 0xC0000000u;
+constexpr uint32_t kStubSize = 0x00100000u;
+GuestFn g_stub_table[kStubSize / 4];
 std::unordered_map<uint32_t, GuestFn> g_stub_fns;
 std::unordered_map<uint32_t, std::string> g_stub_names;
 std::map<std::string, uint32_t> g_export_thunks;
@@ -41,6 +46,21 @@ struct CacheEntry {
     GuestFn fn;
 };
 thread_local CacheEntry t_cache[1024];
+
+__attribute__((noinline)) GuestFn lookup_slow(uint32_t addr) {
+    if (addr - mem::kThunkBase < mem::kThunkSize) return g_thunks[(addr - mem::kThunkBase) >> 2];
+    if (addr - kStubBase < kStubSize) {
+        GuestFn fn = g_stub_table[(addr - kStubBase) >> 2];
+        if (fn) return fn;
+    }
+    CacheEntry& ce = t_cache[(addr >> 2) & 1023];
+    if (ce.addr == addr && ce.fn) return ce.fn;
+    std::shared_lock<std::shared_mutex> l(g_lock);
+    auto it = g_stub_fns.find(addr);
+    if (it == g_stub_fns.end()) return nullptr;
+    ce = {addr, it->second};
+    return it->second;
+}
 }  // namespace
 
 HleRegistration::HleRegistration(const char* lib, const char* name, GuestFn fn) { registry()[key(lib, name)] = fn; }
@@ -54,13 +74,15 @@ namespace dispatch {
 void init() {
     if (g_guest_function_count == 0) {
         g_text_end = mem::kText;
+        g_text_span = 0;
         LOG("dispatch: no recompiled guest functions (build without generated/)");
         return;
     }
     uint32_t hi = 0;
     for (uint32_t i = 0; i < g_guest_function_count; i++) hi = std::max(hi, g_guest_functions[i].addr);
     g_text_end = hi + 4;
-    size_t n = (g_text_end - mem::kText) >> 2;
+    g_text_span = g_text_end - mem::kText;
+    size_t n = g_text_span >> 2;
     g_text_table = (GuestFn*)calloc(n, sizeof(GuestFn));
     for (uint32_t i = 0; i < g_guest_function_count; i++)
         g_text_table[(g_guest_functions[i].addr - mem::kText) >> 2] = g_guest_functions[i].fn;
@@ -68,15 +90,9 @@ void init() {
 }
 
 GuestFn lookup(uint32_t addr) {
-    if (addr >= mem::kText && addr < g_text_end) return g_text_table[(addr - mem::kText) >> 2];
-    if (addr >= mem::kThunkBase && addr < mem::kThunkBase + mem::kThunkSize) return g_thunks[(addr - mem::kThunkBase) >> 2];
-    CacheEntry& ce = t_cache[(addr >> 2) & 1023];
-    if (ce.addr == addr && ce.fn) return ce.fn;
-    std::shared_lock<std::shared_mutex> l(g_lock);
-    auto it = g_stub_fns.find(addr);
-    if (it == g_stub_fns.end()) return nullptr;
-    ce = {addr, it->second};
-    return it->second;
+    uint32_t off = addr - mem::kText;
+    if (__builtin_expect(off < g_text_span, 1)) return g_text_table[off >> 2];
+    return lookup_slow(addr);
 }
 
 uint32_t thunk(GuestFn fn, const char* name) {
@@ -123,6 +139,9 @@ const char* thunk_name(uint32_t addr) {
 
 void add_import_stub(uint32_t addr, GuestFn fn, const char* lib, const char* name) {
     std::unique_lock<std::shared_mutex> l(g_lock);
+    if (addr - kStubBase < kStubSize) {
+        g_stub_table[(addr - kStubBase) >> 2] = fn;
+    }
     g_stub_fns[addr] = fn;
     g_stub_names[addr] = key(lib, name);
 }
@@ -150,10 +169,22 @@ uint32_t guest_call(PPCContext* c, uint32_t fn, std::initializer_list<uint32_t> 
 }
 
 // ---- runtime entry points used by generated code -----------------------------------------------
-extern "C" void rt_call(PPCContext* c, uint32_t target) {
-    GuestFn fn = dispatch::lookup(target);
+static __attribute__((noinline)) void rt_call_slow(PPCContext* c, uint32_t target) {
+    GuestFn fn = lookup_slow(target);
     if (__builtin_expect(!fn, 0)) rt_trap(c, target, "indirect call to an address with no recompiled function");
     fn(c);
+}
+
+extern "C" void rt_call(PPCContext* c, uint32_t target) {
+    uint32_t off = target - mem::kText;
+    if (__builtin_expect(off < g_text_span, 1)) {
+        GuestFn fn = g_text_table[off >> 2];
+        if (__builtin_expect(fn != nullptr, 1)) {
+            fn(c);
+            return;
+        }
+    }
+    rt_call_slow(c, target);
 }
 
 static void dump_context(PPCContext* c) {

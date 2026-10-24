@@ -39,6 +39,14 @@ int core_index(int core) { return core >= 0 && core <= 2 ? core : 1; }
 void run_thread(GuestThread* t) {
     t_current = t;
     t->host_tid = pthread_self();
+#if defined(_WIN32)
+    HANDLE dup = nullptr;
+    if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &dup, 0, FALSE,
+                        DUPLICATE_SAME_ACCESS)) {
+        std::lock_guard<std::mutex> l(g_klock);
+        t->win_handle = dup;
+    }
+#endif
     // The game's main thread and the light timing threads (audio, alarms, GX2 callbacks) get the highest QoS so
     // the scheduler keeps them on performance cores (a phone has two); worker threads one step below.
     const bool critical = t->is_main || t->name == "AX" || t->name == "alarms" || t->name == "GX2 callbacks";
@@ -62,6 +70,12 @@ void run_thread(GuestThread* t) {
     {
         std::lock_guard<std::mutex> l(g_klock);
         t->exited = true;
+#if defined(_WIN32)
+        if (t->win_handle) {
+            CloseHandle((HANDLE)t->win_handle);
+            t->win_handle = nullptr;
+        }
+#endif
         t->exit_value = v;
         mem::w32(t->os + T_EXITVAL, v);
         mem::w8(t->os + T_STATE, 8);  // moribund
@@ -369,6 +383,14 @@ std::vector<std::pair<pthread_t, std::string>> snapshot_live() {
     std::lock_guard<std::mutex> l(g_klock);
     for (auto& [os, t] : g_threads)
         if (t->started && !t->exited && t->host_tid) out.emplace_back(t->host_tid, t->name);
+    return out;
+}
+
+std::vector<std::pair<void*, std::string>> snapshot_live_handles() {
+    std::vector<std::pair<void*, std::string>> out;
+    std::lock_guard<std::mutex> l(g_klock);
+    for (auto& [os, t] : g_threads)
+        if (t->started && !t->exited && t->win_handle) out.emplace_back(t->win_handle, t->name);
     return out;
 }
 

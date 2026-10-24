@@ -202,7 +202,7 @@ if(BOTW_ENABLE_VULKAN)
     endif()
   endif()
 endif()
-target_compile_options(cemu_gpu PRIVATE -w -O2 -g1 "SHELL:-include Common/precompiled.h")
+target_compile_options(cemu_gpu PRIVATE -w -O3 -g1 "SHELL:-include Common/precompiled.h")
 
 file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_SOURCE_DIR}/runtime/src/*.cpp
@@ -223,7 +223,7 @@ if(APPLE)
   target_compile_options(BotWRecomp PRIVATE -Wall -Wno-unused-function -Wno-unused-variable -fwrapv -mcpu=apple-m1
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
 else()
-  target_compile_options(BotWRecomp PRIVATE -Wall -Wno-unused-function -Wno-unused-variable -fwrapv)
+  target_compile_options(BotWRecomp PRIVATE -O3 -g1 -Wall -Wno-unused-function -Wno-unused-variable -fwrapv)
 endif()
 if(BOTW_ENABLE_VULKAN)
   target_compile_definitions(BotWRecomp PRIVATE ENABLE_VULKAN)
