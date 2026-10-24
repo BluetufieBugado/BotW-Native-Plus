@@ -99,6 +99,12 @@ public:
 	// robin_hood::unordered_flat_map<uint64, VkDescriptorSetInfo*> descriptor set cache; ~1.80%
 	// ska::bytell_hash_map<uint64, VkDescriptorSetInfo*, direct_hash<uint64>> descriptor set cache; -> 1.91%
 	DescriptorSetCache ds_cache[VulkanRendererConst::SHADER_STAGE_INDEX_COUNT]; // 1.71%
+	struct DSMruEntry
+	{
+		uint64 stateHash{ 0 };
+		VkDescriptorSetInfo* dsInfo{ nullptr };
+	};
+	DSMruEntry ds_mru[VulkanRendererConst::SHADER_STAGE_INDEX_COUNT][2]{};
 
 	VKRObjectPipeline* m_vkrObjPipeline;
 
@@ -280,6 +286,14 @@ public:
 	VkDescriptorSet backbufferBlit_createDescriptorSet(VkDescriptorSetLayout descriptor_set_layout, LatteTextureViewVk* texViewVk, bool useLinearTexFilter);
 
 	robin_hood::unordered_flat_map<uint64, robin_hood::unordered_flat_map<uint64, PipelineInfo*> > m_pipeline_info_cache; // using robin_hood::unordered_flat_map is twice as fast (1-2% overall CPU time reduction)
+	struct PipelineMruEntry
+	{
+		uint64 vsBaseHash{ 0 };
+		uint64 stateHash{ 0 };
+		PipelineInfo* info{ nullptr };
+	};
+	PipelineMruEntry m_pipeline_mru[4]{};
+	uint32 m_pipeline_mru_hand{ 0 };
 	void draw_debugPipelineHashState();
 	PipelineInfo* draw_getCachedPipeline();
 
@@ -609,6 +623,7 @@ private:
 	std::shared_mutex m_pipeline_cache_save_mutex;
 	std::thread m_pipeline_cache_save_thread;
 	VkPipelineCache m_pipeline_cache{ nullptr };
+	std::wstring m_pipelineCacheFilename;
 	std::unordered_map<uint64, VkPipeline> m_backbufferBlitPipelineCache;
 	std::unordered_map<uint64, VkDescriptorSet> m_backbufferBlitDescriptorSetCache;
 	VkPipelineLayout m_pipelineLayout{nullptr};

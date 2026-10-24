@@ -184,11 +184,11 @@ VKRSynchronizedHeapAllocator::VKRSynchronizedHeapAllocator(class VKRMemoryManage
 VKRSynchronizedHeapAllocator::AllocatorReservation* VKRSynchronizedHeapAllocator::AllocateBufferMemory(uint32 size, uint32 alignment)
 {
 	CHAddr addr = m_chunkedHeap.alloc(size, alignment);
-	m_activeAllocations.emplace_back(addr);
 	AllocatorReservation* res = m_poolAllocatorReservation.allocObj();
 	res->bufferIndex = addr.chunkIndex;
 	res->bufferOffset = addr.offset;
 	res->size = size;
+	res->allocation = addr;
 	res->memPtr = m_chunkedHeap.GetChunkPtr(addr.chunkIndex) + addr.offset;
 	m_chunkedHeap.GetChunkVkMemInfo(addr.chunkIndex, res->vkBuffer, res->vkMem);
 	return res;
@@ -198,10 +198,39 @@ void VKRSynchronizedHeapAllocator::FreeReservation(AllocatorReservation* uploadR
 {
 	// put the allocation on a delayed release queue for the current command buffer
 	uint64 currentCommandBufferId = VulkanRenderer::GetInstance()->GetCurrentCommandBufferId();
-	auto it = std::find_if(m_activeAllocations.begin(), m_activeAllocations.end(), [&uploadReservation](const TrackedAllocation& allocation) { return allocation.allocation.chunkIndex == uploadReservation->bufferIndex && allocation.allocation.offset == uploadReservation->bufferOffset; });
-	cemu_assert_debug(it != m_activeAllocations.end());
-	m_releaseQueue[currentCommandBufferId].emplace_back(it->allocation);
-	m_activeAllocations.erase(it);
+	if (m_lastReleaseCmdId != currentCommandBufferId || !m_lastReleaseVec)
+	{
+		m_lastReleaseVec = nullptr;
+		for (auto& b : m_releaseQueue)
+		{
+			if (b.commandBufferId == currentCommandBufferId)
+			{
+				m_lastReleaseVec = &b.allocations;
+				break;
+			}
+		}
+		if (!m_lastReleaseVec)
+		{
+			for (auto& b : m_releaseQueue)
+			{
+				if (b.commandBufferId == ~0ULL)
+				{
+					b.commandBufferId = currentCommandBufferId;
+					m_lastReleaseVec = &b.allocations;
+					break;
+				}
+			}
+			if (!m_lastReleaseVec)
+			{
+				m_releaseQueue.emplace_back();
+				m_releaseQueue.back().commandBufferId = currentCommandBufferId;
+				m_releaseQueue.back().allocations.reserve(256);
+				m_lastReleaseVec = &m_releaseQueue.back().allocations;
+			}
+		}
+		m_lastReleaseCmdId = currentCommandBufferId;
+	}
+	m_lastReleaseVec->emplace_back(uploadReservation->allocation);
 	m_poolAllocatorReservation.freeObj(uploadReservation);
 }
 
@@ -220,18 +249,20 @@ void VKRSynchronizedHeapAllocator::FlushReservation(AllocatorReservation* upload
 
 void VKRSynchronizedHeapAllocator::CleanupBuffer(uint64 latestFinishedCommandBufferId)
 {
-	auto it = m_releaseQueue.begin();
-	while (it != m_releaseQueue.end())
+	for (auto& b : m_releaseQueue)
 	{
-		if (it->first <= latestFinishedCommandBufferId)
+		if (b.commandBufferId != ~0ULL && b.commandBufferId <= latestFinishedCommandBufferId)
 		{
-			// release allocations
-			for(auto& addr : it->second)
-				m_chunkedHeap.free(addr);
-			it = m_releaseQueue.erase(it);
-			continue;
+			for (auto it = b.allocations.rbegin(); it != b.allocations.rend(); ++it)
+				m_chunkedHeap.free(*it);
+			b.allocations.clear();
+			if (m_lastReleaseCmdId == b.commandBufferId)
+			{
+				m_lastReleaseCmdId = ~0ULL;
+				m_lastReleaseVec = nullptr;
+			}
+			b.commandBufferId = ~0ULL;
 		}
-		it++;
 	}
 }
 

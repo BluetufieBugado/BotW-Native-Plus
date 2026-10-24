@@ -109,13 +109,33 @@ private:
 		return true;
 	}
 
-	void _allocFrom(AllocRange* range, uint32 bucketIndex, uint32 allocOffset, uint32 allocSize)
+	AllocRange* _allocFrom(AllocRange* range, uint32 bucketIndex, uint32 allocOffset, uint32 allocSize)
 	{
 		cemu_assert_debug(allocSize > 0);
+		uint32 headBytes = allocOffset - range->offset;
+		uint32 tailBytes = (range->offset + range->size) - (allocOffset + allocSize);
+		if (headBytes == 0 && tailBytes > 0)
+		{
+			cemu_assert_debug(tailBytes >= TMinimumAlignment);
+			AllocRange* allocRange = m_allocEntriesPool.allocObj(allocOffset, range->chunkIndex, allocSize, false);
+			AllocRange* prevOrd = range->prevOrdered;
+			allocRange->prevOrdered = prevOrd;
+			allocRange->nextOrdered = range;
+			if (prevOrd)
+				prevOrd->nextOrdered = allocRange;
+			range->prevOrdered = allocRange;
+			range->offset = allocOffset + allocSize;
+			range->size = tailBytes;
+			if (ulog2(tailBytes) != bucketIndex)
+			{
+				forgetFreeRange(range, bucketIndex);
+				trackFreeRange(range);
+			}
+			return allocRange;
+		}
 		// remove the range from the chain of free ranges
 		forgetFreeRange(range, bucketIndex);
 		// split head, allocation and tail into separate ranges
-		uint32 headBytes = allocOffset - range->offset;
 		if (headBytes > 0)
 		{
 			// alignment padding -> create free range
@@ -128,7 +148,6 @@ private:
 			head->nextOrdered = range;
 			range->prevOrdered = head;
 		}
-		uint32 tailBytes = (range->offset + range->size) - (allocOffset + allocSize);
 		if (tailBytes > 0)
 		{
 			// tail -> create free range
@@ -144,6 +163,7 @@ private:
 		range->offset = allocOffset;
 		range->size = allocSize;
 		range->isFree = false;
+		return range;
 	}
 
 	CHAddr _alloc(uint32 size, uint32 alignment)
@@ -170,9 +190,10 @@ private:
 				uint32 alignedOffset = (range->offset + alignmentM1) & ~alignmentM1;
 				if ((range->offset + range->size) >= alignedOffset + size)
 				{
-					_allocFrom(range, b, alignedOffset, size);
+					uint32 chunkIdx = range->chunkIndex;
+					AllocRange* allocated = _allocFrom(range, b, alignedOffset, size);
 					m_numAllocatedBytes += size;
-					return CHAddr(alignedOffset, range->chunkIndex, range);
+					return CHAddr(alignedOffset, chunkIdx, allocated);
 				}
 			}
 		}
@@ -196,9 +217,10 @@ private:
 					uint32 endOffset = alignedOffset + size;
 					if((range->offset+range->size) >= endOffset)
 					{
-						_allocFrom(range, bucketIndex, alignedOffset, size);
+						uint32 chunkIdx = range->chunkIndex;
+						AllocRange* allocated = _allocFrom(range, bucketIndex, alignedOffset, size);
 						m_numAllocatedBytes += size;
-						return CHAddr(alignedOffset, range->chunkIndex, range);
+						return CHAddr(alignedOffset, chunkIdx, allocated);
 					}
 				}
 				range = range->nextFree;
@@ -247,27 +269,35 @@ private:
 			}
 			else
 			{
+				uint32 oldBucket = ulog2(prevRange->size);
 				uint32 newSize = (range->offset + range->size) - prevRange->offset;
 				prevRange->nextOrdered = nextRange;
 				if (nextRange)
 					nextRange->prevOrdered = prevRange;
-				forgetFreeRange(prevRange, ulog2(prevRange->size));
 				prevRange->size = newSize;
-				trackFreeRange(prevRange);
+				if (ulog2(newSize) != oldBucket)
+				{
+					forgetFreeRange(prevRange, oldBucket);
+					trackFreeRange(prevRange);
+				}
 				m_allocEntriesPool.freeObj(range);
 			}
 		}
 		else if (nextRange && nextRange->isFree)
 		{
+			uint32 oldBucket = ulog2(nextRange->size);
 			uint32 newOffset = range->offset;
 			uint32 newSize = (nextRange->offset + nextRange->size) - newOffset;
-			forgetFreeRange(nextRange, ulog2(nextRange->size));
 			nextRange->offset = newOffset;
 			nextRange->size = newSize;
 			if (range->prevOrdered)
 				range->prevOrdered->nextOrdered = nextRange;
 			nextRange->prevOrdered = range->prevOrdered;
-			trackFreeRange(nextRange);
+			if (ulog2(newSize) != oldBucket)
+			{
+				forgetFreeRange(nextRange, oldBucket);
+				trackFreeRange(nextRange);
+			}
 			m_allocEntriesPool.freeObj(range);
 		}
 		else
