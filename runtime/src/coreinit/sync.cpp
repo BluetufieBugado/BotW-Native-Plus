@@ -237,6 +237,7 @@ __attribute__((noinline)) void mutex_lock_contended(GuestThread* me, uint32_t m,
 
 inline void mutex_lock(PPCContext* c, uint32_t m) {
     GuestThread* me = c && c->thread ? (GuestThread*)c->thread : threads::current();
+    if (__builtin_expect(me && me->prio >= 18, 0)) threads::maybe_preempt_sync(me);
     MutexState* s = get_mutex_fast(me, m);
     GuestThread* cur = s->owner.load(std::memory_order_relaxed);
     if (__builtin_expect(cur == me && me != nullptr, 0)) {
@@ -286,10 +287,8 @@ inline void mutex_unlock(PPCContext* c, uint32_t m) {
         s->owner.store(nullptr, std::memory_order_seq_cst);
         if (__builtin_expect(s->waiters.load(std::memory_order_seq_cst) > 0, 0)) mutex_unlock_wake(s);
         if (me) {
-            if (--me->held_mutex_count <= 0) {
-                me->held_mutex_count = 0;
-                if (__builtin_expect(me->prio >= 18, 0)) threads::maybe_preempt(me);
-            }
+            if (--me->held_mutex_count <= 0) me->held_mutex_count = 0;
+            if (__builtin_expect(me->prio >= 18, 0)) threads::maybe_preempt_sync(me);
         }
     }
 }

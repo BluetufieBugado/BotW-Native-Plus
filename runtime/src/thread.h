@@ -107,6 +107,9 @@ std::string main_wait_report();
 void note_signal(uint32_t obj);
 void reserve_high_wake(int core);
 void maybe_preempt(GuestThread* me);
+// Like maybe_preempt, but also hands the core over while guest mutexes are held. Only called at guest
+// mutex lock/unlock, where the guest already expects to be rescheduled.
+void maybe_preempt_sync(GuestThread* me);
 void maybe_preempt_current_fast();
 bool should_yield_core(GuestThread* me);
 void diag_on_frame(double frame_ms, size_t frame_idx);
