@@ -36,6 +36,8 @@ struct GuestThread {
     uint32_t exit_value = 0;
     uint32_t entry = 0;
     int core = 1;
+    int32_t prio = 16;
+    int held_mutex_count = 0;
     std::condition_variable cv;  // join / resume waiters
     // what the thread is blocked on, for dump()
     std::atomic<const char*> wait_kind{nullptr};
@@ -100,8 +102,15 @@ std::vector<std::pair<pthread_t, std::string>> snapshot_live();
 std::vector<std::pair<void*, std::string>> snapshot_live_handles();
 
 // Main-thread blocked time per wait kind (frame pacing analysis); report() returns and resets it.
-void note_main_wait(const char* kind, uint64_t ns);
+void note_main_wait(const char* kind, uint32_t obj, uint32_t lr, uint64_t ns);
 std::string main_wait_report();
+void note_signal(uint32_t obj);
+void reserve_high_wake(int core);
+void maybe_preempt(GuestThread* me);
+void maybe_preempt_current_fast();
+bool should_yield_core(GuestThread* me);
+void diag_on_frame(double frame_ms, size_t frame_idx);
+void diag_dump_threads();
 
 // Marks the current guest thread as blocked for the scope of a wait (shown by dump(); the main
 // thread's waits are also timed for main_wait_report()).
@@ -121,8 +130,9 @@ struct WaitMark {
         if (!t) return;
         t->wait_kind = nullptr;
         set_blocked(t, false);
+        if (t->prio <= 17) reserve_high_wake(t->core);
         if (t->is_main)
-            note_main_wait(kind, std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+            note_main_wait(kind, t->wait_obj, t->wait_lr, std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
     }
 };
 }  // namespace threads

@@ -548,6 +548,9 @@ LatteCMDPtr LatteCP_itWaitRegMem(LatteCMDPtr cmd, uint32 nWords)
 			// check if any GPU events happened
 			LatteTiming_HandleTimedVsync();
 			LatteAsyncCommands_checkAndExecute();
+#if defined(__x86_64__) || defined(_M_X64)
+			_mm_pause();
+#endif
 		}
 		performanceMonitor.gpuTime_fenceTime.endMeasuring();
 	}

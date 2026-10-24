@@ -188,8 +188,8 @@ void write_report(bool timed_out) {
     double min_ms = sorted.empty() ? 0.0 : sorted.front();
     double max_ms = sorted.empty() ? 0.0 : sorted.back();
 
-    LOG("[bench] %sframes=%zu wall=%.2fs avg_fps=%.2f 1pct_low_fps=%.2f avg_ms=%.3f p50_ms=%.3f p99_ms=%.3f min_ms=%.3f max_ms=%.3f uncap_hz=%d",
-        timed_out ? "TIMEOUT " : "", n, sum / 1000.0, avg_fps, low1_fps, avg_ms, p50_ms, p99_ms, min_ms, max_ms,
+    LOG("[bench] %sframes=%llu wall=%.2fs avg_fps=%.2f 1pct_low_fps=%.2f avg_ms=%.3f p50_ms=%.3f p99_ms=%.3f min_ms=%.3f max_ms=%.3f uncap_hz=%d",
+        timed_out ? "TIMEOUT " : "", (unsigned long long)n, sum / 1000.0, avg_fps, low1_fps, avg_ms, p50_ms, p99_ms, min_ms, max_ms,
         g_opt.uncap_hz);
 
     std::string path = g_user_root + "/bench.txt";
@@ -235,6 +235,7 @@ void on_swap() {
     std::lock_guard<std::mutex> l(g_lock);
     if (g_last_swap.time_since_epoch().count() != 0) {
         double ms = std::chrono::duration<double, std::milli>(now - g_last_swap).count();
+        threads::diag_on_frame(ms, g_frame_ms.size());
         g_frame_ms.push_back(ms);
     }
     g_last_swap = now;
@@ -291,6 +292,7 @@ bool tick() {
         if (elapsed_s(g_phase_t0) >= g_opt.seconds) {
             stop_profiler();
             LOG("[bench] main thread waits over window: %s", threads::main_wait_report().c_str());
+            threads::diag_dump_threads();
             write_report(false);
             g_phase = Phase::Done;
             return true;
