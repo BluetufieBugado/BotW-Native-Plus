@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <mutex>
 
+#include "../coreinit/mods.h"
 #include "../settings.h"
 
 extern float g_render_scale;  // main.cpp: the scale this run renders at
@@ -16,7 +17,7 @@ std::mutex g_lock;
 std::atomic<bool> g_open{false};
 int g_cursor = 0;
 
-enum RowId { kFps, kScale, kDisplay, kFilter, kGyro, kRumble, kLayout, kTouch, kShowFps, kVolume, kGamepadView, kClose, kRows };
+enum RowId { kFps, kScale, kDisplay, kFilter, kGyro, kRumble, kLayout, kTouch, kShowFps, kVolume, kGamepadView, kMods, kClose, kRows };
 const float kScales[] = {0, 0.5f, 0.75f, 1, 1.5f, 2, 2.5f, 3};  // 0 = fit the display
 const char* kDisplays[] = {"Fit 16:9", "Stretch", "Fill (crop)"};
 const char* kFilters[] = {"Bilinear", "Bicubic", "Hermite", "Nearest"};
@@ -104,7 +105,7 @@ void change(int dir) {
         std::lock_guard<std::mutex> l(g_lock);
         row = g_cursor;
     }
-    if (row == kClose) return;
+    if (row == kClose || row == kMods) return;  // Mods is information only
     Settings s = settings::get();
     step(s, row, dir);
     settings::set(s);
@@ -152,6 +153,7 @@ View view() {
     snprintf(b, sizeof b, "%d%%", s.volume);
     v.rows[kVolume] = {"Volume", b};
     v.rows[kGamepadView] = {"GamePad screen", s.gamepad_view ? "Beside the TV (F2)" : "Off (F2)"};
+    v.rows[kMods] = {"Mods", mods::summary()};
     v.rows[kClose] = {"Close", "", true};
     snprintf(b, sizeof b, "Rendering at %gx now; resolution changes apply after a restart.", g_render_scale);
     v.note = b;

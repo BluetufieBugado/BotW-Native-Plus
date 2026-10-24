@@ -7,6 +7,7 @@ RTX 5060 result are in the [repository README](../README.md).
 | --- | --- |
 | [README](../README.md) | Windows 10/11 Vulkan build. The full control map is not in this branch. |
 | [VENDORED.md](../runtime/cemu/VENDORED.md) | Which Cemu sources are included, and the MPL-2.0 terms. |
+| [mods.md](mods.md) | File replacement mods: folder layout, `mods.ini`, and what is not supported yet. Untested in game. |
 | [native-renderer.md](native-renderer.md) | Experimental Metal renderer. Off by default. The original Apple research, not the Windows path. |
 | [iOS porting notes](../ios/PORTING.md) | Upstream BotW Recompiled's iPhone and Mac notes. Metal is the original Apple backend. |
 

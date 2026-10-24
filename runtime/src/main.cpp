@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <string>
 
+#include "coreinit/mods.h"
 #include "hle.h"
 #include "loader.h"
 #include "os.h"
@@ -144,6 +145,7 @@ int main(int argc, char** argv) {
     Settings opt = settings::get();
 
     int capture_every = 0;
+    bool use_mods = true;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--game" && i + 1 < argc) g_game_root = argv[++i];
@@ -154,6 +156,7 @@ int main(int argc, char** argv) {
         else if (a == "--script" && i + 1 < argc) window::set_script(argv[++i]);
         else if (a == "--trace-hle") g_trace_hle = 1;
         else if (a == "--no-gyro") opt.gyro = false;
+        else if (a == "--no-mods") use_mods = false;  // ignore <user>/mods for this run
         else if (a == "--gamepad-view") opt.gamepad_view = true;  // GamePad screen beside the TV image
         else if (a == "--no-gamepad-view") opt.gamepad_view = false;
         else if (a == "--trace-frames" && i + 1 < argc) sscanf(argv[++i], "%llu-%llu", &g_trace_from, &g_trace_to);
@@ -172,6 +175,7 @@ int main(int argc, char** argv) {
     if (g_game_root.empty()) {
         if (const char* e = getenv("BOTW_GAME")) g_game_root = e;
     }
+    mods::init(g_game_root, g_user_root, use_mods);  // content mods and DLC (docs/mods.md)
 #if defined(_WIN32)
     // Before mem::init, so the first guest touch can commit its page.
     AddVectoredExceptionHandler(1, on_vectored_exception);

@@ -293,3 +293,12 @@ message(STATUS "BotWRecomp backends: Metal=${BOTW_ENABLE_METAL} Vulkan=${BOTW_EN
 
 # Native Metal GPU path (docs/native-renderer.md): option BOTW_NATIVE_GPU, default OFF (gpu_native.cmake).
 include(${CMAKE_SOURCE_DIR}/runtime/src/gpu_native/gpu_native.cmake OPTIONAL)
+
+# Unit test for the mod file index (docs/mods.md). Off by default.
+option(BOTW_BUILD_TESTS "Build the BotWModTests unit test" OFF)
+if(BOTW_BUILD_TESTS)
+  add_executable(BotWModTests tests/mods_test.cpp runtime/src/coreinit/mods.cpp runtime/src/log.cpp)
+  target_include_directories(BotWModTests PRIVATE runtime/src)
+  enable_testing()
+  add_test(NAME mods COMMAND BotWModTests)
+endif()
