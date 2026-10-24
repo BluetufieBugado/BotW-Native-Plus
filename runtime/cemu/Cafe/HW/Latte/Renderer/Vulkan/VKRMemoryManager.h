@@ -224,6 +224,7 @@ class VKRSynchronizedHeapAllocator
 		uint32 bufferOffset;
 		uint32 size;
 		uint32 bufferIndex;
+		CHAddr allocation;
 	};
 
 	AllocatorReservation* AllocateBufferMemory(uint32 size, uint32 alignment);
@@ -240,7 +241,14 @@ class VKRSynchronizedHeapAllocator
 	std::vector<TrackedAllocation> m_activeAllocations;
 	MemoryPool<AllocatorReservation> m_poolAllocatorReservation{32};
 	// release queue
-	std::unordered_map<uint64, std::vector<CHAddr>> m_releaseQueue;
+	struct ReleaseQueueBucket
+	{
+		uint64 commandBufferId{~0ULL};
+		std::vector<CHAddr> allocations;
+	};
+	std::vector<ReleaseQueueBucket> m_releaseQueue;
+	uint64 m_lastReleaseCmdId{~0ULL};
+	std::vector<CHAddr>* m_lastReleaseVec{nullptr};
 };
 
 void LatteIndices_invalidateAll();

@@ -1574,7 +1574,7 @@ void LatteCP_ProcessRingbuffer()
 			{
 				DrawPassContext drawPassCtx;
 				drawPassCtx.beginDrawPass();
-				cemuLog_log(LogType::Force, "[TopLevel] DrawIndex2");
+				//cemuLog_log(LogType::Force, "[TopLevel] DrawIndex2");
 				LatteCP_itDrawIndex2(cmd, nWords, drawPassCtx);
 				drawPassCtx.endDrawPass();
 				timerRecheck += CP_TIMER_RECHECK / 64;
@@ -1584,7 +1584,7 @@ void LatteCP_ProcessRingbuffer()
 			{
 				DrawPassContext drawPassCtx;
 				drawPassCtx.beginDrawPass();
-				cemuLog_log(LogType::Force, "[TopLevel] DrawIndexAuto");
+				//cemuLog_log(LogType::Force, "[TopLevel] DrawIndexAuto");
 				LatteCP_itDrawIndexAuto(cmd, nWords, drawPassCtx);
 				drawPassCtx.endDrawPass();
 				timerRecheck += CP_TIMER_RECHECK / 512;
@@ -1594,7 +1594,7 @@ void LatteCP_ProcessRingbuffer()
 			{
 				DrawPassContext drawPassCtx;
 				drawPassCtx.beginDrawPass();
-				cemuLog_log(LogType::Force, "[TopLevel] DrawIndexImm");
+				//cemuLog_log(LogType::Force, "[TopLevel] DrawIndexImm");
 				LatteCP_itDrawImmediate(cmd, nWords, drawPassCtx);
 				drawPassCtx.endDrawPass();
 				timerRecheck += CP_TIMER_RECHECK / 64;

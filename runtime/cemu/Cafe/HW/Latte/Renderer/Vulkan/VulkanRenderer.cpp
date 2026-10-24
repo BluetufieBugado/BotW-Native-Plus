@@ -2345,20 +2345,21 @@ void VulkanRenderer::PipelineCacheSaveThread(size_t cache_size)
 		}
 	}
 
-	const auto filename = dir / fmt::format(L"{:016x}.bin", CafeSystem::GetForegroundTitleId());
+	const auto filename = dir / (m_pipelineCacheFilename.empty()
+		? fmt::format(L"{:016x}.bin", CafeSystem::GetForegroundTitleId())
+		: m_pipelineCacheFilename);
 
 	while (true)
 	{
-		if (m_destructionRequested)
-			return;
 		m_pipeline_cache_semaphore.wait();
-		if (m_destructionRequested)
-			return;
-		for (sint32 i = 0; i < 15 * 4; i++)
+		if (!m_destructionRequested)
 		{
-			if (m_destructionRequested)
-				return;
-			std::this_thread::sleep_for(std::chrono::milliseconds(250));
+			for (sint32 i = 0; i < 15 * 4; i++)
+			{
+				if (m_destructionRequested)
+					break;
+				std::this_thread::sleep_for(std::chrono::milliseconds(250));
+			}
 		}
 
 		// always prioritize the compiler threads over this thread
@@ -2402,16 +2403,33 @@ void VulkanRenderer::PipelineCacheSaveThread(size_t cache_size)
 			m_pipeline_cache_semaphore.reset();
 			m_pipeline_cache_save_mutex.unlock();
 		}
+		if (m_destructionRequested)
+			return;
 	}
 }
 
 void VulkanRenderer::CreatePipelineCache()
 {
+	VkPhysicalDeviceProperties devProps{};
+	vkGetPhysicalDeviceProperties(m_physicalDevice, &devProps);
+	uint64 uuidHi = 0, uuidLo = 0;
+	memcpy(&uuidHi, devProps.pipelineCacheUUID, 8);
+	memcpy(&uuidLo, devProps.pipelineCacheUUID + 8, 8);
+	m_pipelineCacheFilename = fmt::format(
+		L"{:016x}_{:04x}_{:04x}_{:016x}{:016x}.bin",
+		CafeSystem::GetForegroundTitleId(),
+		devProps.vendorID,
+		devProps.deviceID,
+		uuidHi,
+		uuidLo);
+
 	std::vector<uint8_t> cacheData;
 	const auto dir = ActiveSettings::GetCachePath("shaderCache/driver/vk");
 	if (fs::exists(dir))
 	{
-		const auto filename = dir / fmt::format("{:016x}.bin", CafeSystem::GetForegroundTitleId());
+		auto filename = dir / m_pipelineCacheFilename;
+		if (!fs::exists(filename))
+			filename = dir / fmt::format("{:016x}.bin", CafeSystem::GetForegroundTitleId());
 		auto file = std::ifstream(filename, std::ios::in | std::ios::binary | std::ios::ate);
 		if (file.is_open())
 		{
@@ -3479,6 +3497,12 @@ VkDescriptorSetInfo::~VkDescriptorSetInfo()
 	for (auto& it : list_referencedViews)
 		it->RemoveDescriptorSetReference(this);
 	// unregister
+	const size_t stageIdx = static_cast<size_t>(shaderType);
+	for (uint32 i = 0; i < 2; ++i)
+	{
+		if (pipeline_info->ds_mru[stageIdx][i].dsInfo == this)
+			pipeline_info->ds_mru[stageIdx][i].dsInfo = nullptr;
+	}
 	auto r = pipeline_info->GetDescriptorSetCache(shaderType).erase(stateHash);
 	cemu_assert_debug(r == 1);
 	// update global stats

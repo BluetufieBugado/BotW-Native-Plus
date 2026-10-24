@@ -903,6 +903,7 @@ private:
 std::unique_ptr<VHeap> g_gpuBufferHeap = nullptr;
 std::vector<uint8> s_pageUploadBuffer;
 std::vector<class BufferCacheNode*> s_allCacheNodes;
+static class BufferCacheNode* s_lastRangeNode = nullptr;
 
 void LatteBufferCache_removeSingleNodeFromTree(BufferCacheNode* node);
 
@@ -914,6 +915,8 @@ class BufferCacheNode
 public:
 	~BufferCacheNode()
 	{
+		if (s_lastRangeNode == this)
+			s_lastRangeNode = nullptr;
 		if (m_hasCacheAlloc)
 			g_deallocateQueue.emplace_back(m_cacheOffset); // release after current drawcall
 		// remove from array
@@ -1260,19 +1263,10 @@ private:
 		uint32 uploadRangeBegin = m_rangeBegin + firstPage * CACHE_PAGE_SIZE;
 		uint32 uploadRangeEnd = m_rangeBegin + lastPagePlusOne * CACHE_PAGE_SIZE;
 		cemu_assert_debug(uploadRangeEnd > uploadRangeBegin);
-		// make sure uploaded pages and hashes match
-		uint32 numPages = lastPagePlusOne - firstPage;
-		if (s_pageUploadBuffer.size() < (numPages * CACHE_PAGE_SIZE))
-			s_pageUploadBuffer.resize(numPages * CACHE_PAGE_SIZE);
-		// todo - improve performance by merging memcpy + hashPage() ?
+		uint32 uploadSize = uploadRangeEnd - uploadRangeBegin;
 		uint8* ram = memory_getPointerFromPhysicalOffset(uploadRangeBegin);
-		memory_commit_span(ram, numPages * CACHE_PAGE_SIZE);
-		memcpy(s_pageUploadBuffer.data(), ram, numPages * CACHE_PAGE_SIZE);
-		for (uint32 i = 0; i < numPages; i++)
-		{
-			m_pageInfo[firstPage + i].hash = hashPage(s_pageUploadBuffer.data() + i * CACHE_PAGE_SIZE);
-		}
-		g_renderer->bufferCache_upload(s_pageUploadBuffer.data(), uploadRangeEnd - uploadRangeBegin, getBufferOffset(uploadRangeBegin));
+		memory_commit_span(ram, uploadSize);
+		g_renderer->bufferCache_upload(ram, uploadSize, getBufferOffset(uploadRangeBegin));
 	}
 
 	// upload only non-streamout data of a single page
@@ -1532,17 +1526,25 @@ std::vector<uint32> BufferCacheNode::g_deallocateQueue;
 
 void LatteBufferCache_removeSingleNodeFromTree(BufferCacheNode* node)
 {
+	if (s_lastRangeNode == node)
+		s_lastRangeNode = nullptr;
 	g_gpuBufferCache.RemoveRange(node->GetRangeBegin(), node->GetRangeEnd());
 }
 
 BufferCacheNode* LatteBufferCache_reserveRange(MPTR physAddress, uint32 size)
 {
+	if (s_lastRangeNode && physAddress >= s_lastRangeNode->GetRangeBegin() && (physAddress + size) <= s_lastRangeNode->GetRangeEnd())
+		return s_lastRangeNode;
+
 	MPTR rangeStart = physAddress - (physAddress % CACHE_PAGE_SIZE);
 	MPTR rangeEnd = (physAddress + size + CACHE_PAGE_SIZE_M1) & ~CACHE_PAGE_SIZE_M1;
 
 	BufferCacheNode* range = g_gpuBufferCache.GetRange(physAddress);
 	if (range && physAddress >= range->GetRangeBegin() && (physAddress+size) <= range->GetRangeEnd())
+	{
+		s_lastRangeNode = range;
 		return range;
+	}
 	// no containing range found, we need to create a range and potentially merge with any overlapping ranges
 	g_gpuBufferCache.GetOverlappingRanges(rangeStart, rangeEnd, s_gpuCacheQueryResult);
 	if (s_gpuCacheQueryResult.empty())
@@ -1550,6 +1552,7 @@ BufferCacheNode* LatteBufferCache_reserveRange(MPTR physAddress, uint32 size)
 		// no overlaps we can just create a new blank range
 		BufferCacheNode* newRange = BufferCacheNode::Create(rangeStart, rangeEnd, s_gpuCacheQueryResult);
 		g_gpuBufferCache.AddRange(rangeStart, rangeEnd, newRange);
+		s_lastRangeNode = newRange;
 		return newRange;
 	}
 	else
@@ -1561,6 +1564,7 @@ BufferCacheNode* LatteBufferCache_reserveRange(MPTR physAddress, uint32 size)
 			g_gpuBufferCache.RemoveRange(it->GetRangeBegin(), it->GetRangeEnd()); // remove from interval tree, BufferCacheNode::Create below will delete the range objects
 		BufferCacheNode* newRange = BufferCacheNode::Create(mergedRangeStart, mergedRangeEnd, s_gpuCacheQueryResult);
 		g_gpuBufferCache.AddRange(mergedRangeStart, mergedRangeEnd, newRange);
+		s_lastRangeNode = newRange;
 		return newRange;
 	}
 }
@@ -1610,7 +1614,13 @@ void LatteBufferCache_invalidate(MPTR physAddress, uint32 size)
 void LatteBufferCache_invalidatePage(MPTR physAddress)
 {
 	cemu_assert_debug((physAddress & CACHE_PAGE_SIZE_M1) == 0);
-	BufferCacheNode* node = g_gpuBufferCache.GetRange(physAddress);
+	BufferCacheNode* node = s_lastRangeNode;
+	if (!node || physAddress < node->GetRangeBegin() || physAddress >= node->GetRangeEnd())
+	{
+		node = g_gpuBufferCache.GetRange(physAddress);
+		if (node)
+			s_lastRangeNode = node;
+	}
 	if (node)
 	{
 		cemu_assert_debug(physAddress >= node->GetRangeBegin() && physAddress < node->GetRangeEnd());
@@ -1653,6 +1663,8 @@ public:
 	void Set(uint32 index)
 	{
 		auto& v = m_bits[index & TABLE_MASK];
+		if (!v.empty() && v.back() == index)
+			return;
 		if (std::find(v.cbegin(), v.cend(), index) != v.end())
 			return;
 		if (v.empty())

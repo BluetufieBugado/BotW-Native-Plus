@@ -153,17 +153,32 @@ PipelineInfo* VulkanRenderer::draw_getCachedPipeline()
 	const auto pixelShader = LatteSHRC_GetActivePixelShader();
 	auto cachedFboVk = (CachedFBOVk*)m_state.activeFBO;
 
+	const uint64 vsBaseHash = vertexShader->baseHash;
 	const uint64 stateHash = draw_calculateGraphicsPipelineHash(fetchShader, vertexShader, geometryShader, pixelShader, cachedFboVk->GetRenderPassObj(), LatteGPUState.contextNew);
+
+	for (uint32 i = 0; i < 4; ++i)
+	{
+		if (m_pipeline_mru[i].info && m_pipeline_mru[i].stateHash == stateHash && m_pipeline_mru[i].vsBaseHash == vsBaseHash)
+			return m_pipeline_mru[i].info;
+	}
 
 	const auto innerit = it->second.find(stateHash);
 	if (innerit == it->second.cend())
 		return nullptr;
 
-	return innerit->second;
+	PipelineInfo* found = innerit->second;
+	m_pipeline_mru[m_pipeline_mru_hand & 3] = { vsBaseHash, stateHash, found };
+	m_pipeline_mru_hand++;
+	return found;
 }
 
 void VulkanRenderer::unregisterGraphicsPipeline(PipelineInfo* pipelineInfo)
 {
+	for (uint32 i = 0; i < 4; ++i)
+	{
+		if (m_pipeline_mru[i].info == pipelineInfo)
+			m_pipeline_mru[i].info = nullptr;
+	}
 	bool removedFromCache = false;
 	for (auto& topMapItr : m_pipeline_info_cache)
 	{
@@ -580,10 +595,23 @@ VkDescriptorSetInfo* VulkanRenderer::draw_getOrCreateDescriptorSet(PipelineInfo*
 {
 	const uint64 stateHash = GetDescriptorSetStateHash(shader);
 	cemu_assert_debug(shader->shaderType == LatteConst::ShaderType::Vertex || shader->shaderType == LatteConst::ShaderType::Pixel || shader->shaderType == LatteConst::ShaderType::Geometry);
+	const size_t stageIdx = static_cast<size_t>(shader->shaderType);
+	auto* mru = pipeline_info->ds_mru[stageIdx];
+	if (mru[0].dsInfo && mru[0].stateHash == stateHash)
+		return mru[0].dsInfo;
+	if (mru[1].dsInfo && mru[1].stateHash == stateHash)
+	{
+		std::swap(mru[0], mru[1]);
+		return mru[0].dsInfo;
+	}
 	auto& ds_cache = pipeline_info->GetDescriptorSetCache(shader->shaderType);
 	const auto it = ds_cache.find(stateHash);
 	if (it != ds_cache.cend())
+	{
+		mru[1] = mru[0];
+		mru[0] = { stateHash, it->second };
 		return it->second;
+	}
 
 	VkDescriptorSetLayout descriptor_set_layout;
 	switch (shader->shaderType)
@@ -991,6 +1019,8 @@ VkDescriptorSetInfo* VulkanRenderer::draw_getOrCreateDescriptorSet(PipelineInfo*
 		vkUpdateDescriptorSets(m_logicalDevice, (uint32)descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
 
 	ds_cache[stateHash] = dsInfo;
+	mru[1] = mru[0];
+	mru[0] = { stateHash, dsInfo };
 
 	return dsInfo;
 }
