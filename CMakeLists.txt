@@ -301,7 +301,7 @@ if(WIN32)
   # `#pragma comment(lib, "ntdll.lib")` is MSVC-only; gcc ignores it, so this
   # link is what resolves the symbol. The Windows CI job links SystemInfoWin.cpp
   # into this executable and fails if ntdll is dropped.
-  target_link_libraries(BotWRecomp PRIVATE psapi ntdll)
+  target_link_libraries(BotWRecomp PRIVATE psapi ntdll mfplat mfuuid ole32)
 endif()
 if(APPLE)
   target_link_libraries(BotWRecomp PRIVATE

@@ -1591,7 +1591,7 @@ struct ModsWindow : Window {
         list = ui::list(hwnd, ID_MODS, LVS_EX_CHECKBOXES);
         const wchar_t* cols[] = {L"On / Mod Name", L"#", L"Version", L"Preset", L"Status / Files"};
         add_columns(list, cols, 5);
-        install_b = ui::button(hwnd, ID_MOD_INSTALL, L"Install Mod (.zip / Folder)...", ui::Kind::Primary, true);
+        install_b = ui::button(hwnd, ID_MOD_INSTALL, L"Install Mod (.zip / .bnp / Folder)...", ui::Kind::Primary, true);
         toggle_b = ui::button(hwnd, ID_MOD_TOGGLE, L"Enable / Disable", ui::Kind::Normal, true);
         up_b = ui::button(hwnd, ID_MOD_UP, L"Move up", ui::Kind::Normal, true);
         down_b = ui::button(hwnd, ID_MOD_DOWN, L"Move down", ui::Kind::Normal, true);
@@ -1607,7 +1607,7 @@ struct ModsWindow : Window {
     }
     std::wstring hint_text() const {
         std::wstring s = L"Mods live in " + mods::mods_dir(user_root()).wstring() +
-                         L". Checked mods load in priority order from top (#1) to bottom (later overrides earlier). Drop a .zip or mod folder anywhere here to install it.";
+                         L". Checked mods load in priority order from top (#1) to bottom (later overrides earlier). Drop a .zip, .bnp, or mod folder anywhere here to install it.";
         if (g.mods.list.empty()) s += L" No mods installed yet.";
         return s;
     }
@@ -1841,7 +1841,7 @@ struct ModsWindow : Window {
         save(false);
     }
     void on_install() {
-        std::wstring picked = pick_browse(hwnd, L"Select a BotW mod folder or a .zip archive to install.", true);
+        std::wstring picked = pick_browse(hwnd, L"Select a BotW mod folder or a .zip / .bnp archive to install.", true);
         if (picked.empty()) return;
         install_and_select(picked);
     }

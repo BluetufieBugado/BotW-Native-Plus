@@ -1,3 +1,9 @@
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 // Full-fledged mod overlay, Cemu graphic pack engine ([Definition], [Default], [Preset],
 // [TextureRedefine]), arithmetic/comparison expression evaluator, patches.txt / patch_*.txt
 // memory & function entry patcher, custom GLSL shader replacement loader, smart mod root
@@ -3029,8 +3035,8 @@ bool install_from_path(const std::string& user_root, const std::string& src_path
     std::string stem = path_to_utf8(src.filename());
     if (fs::is_regular_file(src, ec)) {
         std::string ext = lower_ascii(path_to_utf8(src.extension()));
-        if (ext != ".zip") {
-            return set_err("Only .zip archives or mod folders can be installed directly.");
+        if (ext != ".zip" && ext != ".bnp" && ext != ".7z") {
+            return set_err("Only .zip / .bnp / .7z archives or mod folders can be installed directly.");
         }
         stem = path_to_utf8(src.stem());
     }
@@ -3042,8 +3048,64 @@ bool install_from_path(const std::string& user_root, const std::string& src_path
     if (fs::is_regular_file(src, ec)) {
         std::string zip_err;
         if (!extract_zip_utf8(src, staging, zip_err)) {
-            fs::remove_all(staging, ec);
-            return set_err(zip_err);
+            bool tar_ok = false;
+#ifdef _WIN32
+            fs::create_directories(staging, ec);
+            std::wstring cmd = L"C:\\Windows\\System32\\tar.exe -xf \"" + src.wstring() + L"\" -C \"" + staging.wstring() + L"\"";
+            STARTUPINFOW si{};
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_HIDE;
+            PROCESS_INFORMATION pi{};
+            std::vector<wchar_t> cmd_buf(cmd.begin(), cmd.end());
+            cmd_buf.push_back(L'\0');
+            if (CreateProcessW(nullptr, cmd_buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+                WaitForSingleObject(pi.hProcess, 120000);
+                DWORD exit_code = 1;
+                GetExitCodeProcess(pi.hProcess, &exit_code);
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                tar_ok = (exit_code == 0);
+            }
+#endif
+            if (!tar_ok) {
+                fs::remove_all(staging, ec);
+                return set_err(zip_err);
+            }
+        }
+        fs::path info_p = staging / "info.json";
+        fs::path rules_p = staging / "rules.txt";
+        if (fs::is_regular_file(info_p, ec) && !fs::is_regular_file(rules_p, ec)) {
+            std::string jtxt;
+            if (read_file_utf8(info_p, jtxt)) {
+                auto get_jstr = [&](const char* k) -> std::string {
+                    std::string pat = std::string("\"") + k + "\"";
+                    size_t p = jtxt.find(pat);
+                    if (p == std::string::npos) return {};
+                    p = jtxt.find(':', p + pat.size());
+                    if (p == std::string::npos) return {};
+                    p = jtxt.find('"', p + 1);
+                    if (p == std::string::npos) return {};
+                    ++p;
+                    std::string s;
+                    while (p < jtxt.size() && jtxt[p] != '"') {
+                        if (jtxt[p] == '\\' && p + 1 < jtxt.size()) { ++p; if (jtxt[p] == 'n') break; }
+                        s.push_back(jtxt[p++]);
+                    }
+                    return std::string(trim(s));
+                };
+                std::string mname = get_jstr("name");
+                std::string mdesc = get_jstr("desc");
+                if (!mname.empty()) {
+                    std::ofstream rout(rules_p, std::ios::binary | std::ios::trunc);
+                    rout << "[Definition]\r\n"
+                         << "titleIds = 00050000101C9300,00050000101C9400,00050000101C9500\r\n"
+                         << "name = " << mname << "\r\n"
+                         << "path = \"The Legend of Zelda: Breath of the Wild/Mods/" << mname << "\"\r\n"
+                         << "description = " << (mdesc.empty() ? mname : mdesc) << "\r\n"
+                         << "version = 7\r\n";
+                }
+            }
         }
     } else if (fs::is_directory(src, ec)) {
         fs::create_directories(staging, ec);
