@@ -66,8 +66,11 @@ static_assert(std::atomic<uint64_t>::is_always_lock_free, "interval loads must n
 static_assert(std::atomic<int>::is_always_lock_free, "interval count must not take a lock");
 
 bool covered(uint64_t addr, uint64_t end) {
+    uint64_t b0 = g_iv[0].b.load(std::memory_order_relaxed);
+    uint64_t e0 = g_iv[0].e.load(std::memory_order_relaxed);
+    if (__builtin_expect(e0 != 0 && addr >= b0 && end <= e0, 1)) return true;
     int n = g_iv_n.load(std::memory_order_acquire);
-    for (int i = 0; i < n; i++) {
+    for (int i = 1; i < n; i++) {
         uint64_t b = g_iv[i].b.load(std::memory_order_relaxed);
         uint64_t e = g_iv[i].e.load(std::memory_order_relaxed);
         if (e && addr >= b && end <= e) return true;
@@ -76,8 +79,9 @@ bool covered(uint64_t addr, uint64_t end) {
 }
 
 bool watch_blocks_write(uint64_t begin, uint64_t end) {
-    uint64_t p = g_ro_page.load(std::memory_order_acquire);
-    if (p == UINT64_MAX || !g_page) return false;
+    uint64_t p = g_ro_page.load(std::memory_order_relaxed);
+    if (__builtin_expect(p == UINT64_MAX, 1)) return false;
+    if (!g_page) return false;
     return begin < p + g_page && end > p;
 }
 
@@ -163,16 +167,16 @@ void init() {
     // Matches the ranges in runtime/cemu_shims/cemu_shims_impl.cpp. Code cave through the sys heap
     // is one span (0x01800000..0x10000000). Locked cache is three cores at a 256 KB stride.
     const Range ranges[] = {
-        {0x00010000, 0x000F0000, "low"},
-        {0x00E00000, 0x00200000, "trampoline"},
         {0x01800000, 0x0E800000, "code/sys"},
         {kMem2, kMem2Size, "MEM2"},
+        {kMem1, kMem1Size, "MEM1"},
         {kFgBucket, kFgBucketSize, "foreground"},
         {0xE8000000, 0x02000000, "tiling"},
-        {kMem1, kMem1Size, "MEM1"},
         {0xF6000000, 0x02000000, "rpl"},
         {0xF8000000, 0x02000000, "shared"},
         {kLockedCache, 0x000C0000, "locked cache"},
+        {0x00E00000, 0x00200000, "trampoline"},
+        {0x00010000, 0x000F0000, "low"},
     };
     uint64_t charged = 0;
     for (const Range& r : ranges) {

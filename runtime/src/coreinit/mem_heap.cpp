@@ -141,9 +141,24 @@ uint32_t create_frm(uint32_t start, uint32_t size, uint32_t flags) {
     return h;
 }
 
+uint32_t g_mru_h0 = 0, g_mru_h1 = 0;
+Heap* g_mru_p0 = nullptr;
+Heap* g_mru_p1 = nullptr;
+
 Heap* heap(uint32_t h) {
+    if (h == g_mru_h0 && g_mru_p0) return g_mru_p0;
+    if (h == g_mru_h1 && g_mru_p1) {
+        std::swap(g_mru_h0, g_mru_h1);
+        std::swap(g_mru_p0, g_mru_p1);
+        return g_mru_p0;
+    }
     auto it = g_heaps.find(h);
-    return it == g_heaps.end() ? nullptr : it->second;
+    if (it == g_heaps.end()) return nullptr;
+    g_mru_h1 = g_mru_h0;
+    g_mru_p1 = g_mru_p0;
+    g_mru_h0 = h;
+    g_mru_p0 = it->second;
+    return it->second;
 }
 
 uint32_t heap_alloc(uint32_t h, uint32_t size, int32_t align) {
@@ -248,6 +263,8 @@ HLE_EXPORT(coreinit, MEMDestroyExpHeap) {
     std::lock_guard<std::recursive_mutex> l(g_heap_lock);
     Heap* hp = heap(ARG(0));
     if (hp) {
+        if (g_mru_h0 == ARG(0)) { g_mru_h0 = 0; g_mru_p0 = nullptr; }
+        if (g_mru_h1 == ARG(0)) { g_mru_h1 = 0; g_mru_p1 = nullptr; }
         g_heaps.erase(ARG(0));
         delete hp;
     }
@@ -296,11 +313,21 @@ HLE_EXPORT(coreinit, MEMInitAllocatorForExpHeap) {
 }
 HLE_EXPORT(coreinit, MEMAllocFromAllocator) {
     uint32_t a = ARG(0);
-    RET(guest_call(c, mem::r32(mem::r32(a)), {a, ARG(1)}));
+    uint32_t funcs = mem::r32(a);
+    if (__builtin_expect(funcs == g_allocator_funcs, 1)) {
+        RET(heap_alloc(mem::r32(a + 4), ARG(1), (int32_t)mem::r32(a + 8)));
+        return;
+    }
+    RET(guest_call(c, mem::r32(funcs), {a, ARG(1)}));
 }
 HLE_EXPORT(coreinit, MEMFreeToAllocator) {
     uint32_t a = ARG(0);
-    guest_call(c, mem::r32(mem::r32(a) + 4), {a, ARG(1)});
+    uint32_t funcs = mem::r32(a);
+    if (__builtin_expect(funcs == g_allocator_funcs, 1)) {
+        heap_free(mem::r32(a + 4), ARG(1));
+        return;
+    }
+    guest_call(c, mem::r32(funcs + 4), {a, ARG(1)});
 }
 
 // void OSGetMemBound(int type, void** start, uint32_t* size)

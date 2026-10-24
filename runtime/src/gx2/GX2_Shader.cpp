@@ -853,7 +853,6 @@ namespace GX2
 	// gx2Export_GX2RSetVertexUniformBlock: r3 = buffer, r4 = index, r5 = offset
 	void GX2RSetVertexUniformBlock(GX2RBuffer* bufferPtr, uint32 index, uint32 offset)
 	{
-		GX2::GX2ReserveCmdSpace(9);
 		_GX2SubmitUniformBlock(mmSQ_VTX_UNIFORM_BLOCK_START - mmSQ_TEX_RESOURCE_WORD0, index, bufferPtr->GetVirtualAddr() + offset, bufferPtr->GetSize() - offset);
 	}
 

@@ -13,16 +13,14 @@
 #include "thread.h"
 #include "title_diag.h"
 
-namespace {
-std::atomic<int> g_diag_on{-1};
-}
+std::atomic<int> g_diag_on_flag{-1};
 
-bool diag_on() {
-    int v = g_diag_on.load(std::memory_order_relaxed);
+bool diag_init_slow() {
+    int v = g_diag_on_flag.load(std::memory_order_relaxed);
     if (v >= 0) return v == 1;
     const char* e = getenv("BOTW_DIAG");
     v = (e && e[0] && e[0] != '0') ? 1 : 0;
-    g_diag_on.store(v, std::memory_order_relaxed);
+    g_diag_on_flag.store(v, std::memory_order_relaxed);
     return v == 1;
 }
 
@@ -70,7 +68,7 @@ void dump_ring(const char* tag, char ring[][kLine], uint32_t n, uint32_t cap) {
 }
 }  // namespace
 
-void diag_fs(const char* path, const char* fmt, ...) {
+void diag_fs_slow(const char* path, const char* fmt, ...) {
     if (!enabled()) return;
     char line[kLine];
     va_list ap;
@@ -85,7 +83,7 @@ void diag_fs(const char* path, const char* fmt, ...) {
     }
 }
 
-void diag_sync(const char* fmt, ...) {
+void diag_sync_slow(const char* fmt, ...) {
     if (!enabled() || !focus_thread()) return;
     char line[kLine];
     va_list ap;
@@ -173,7 +171,7 @@ void note_max_area(uint32_t& mw, uint32_t& mh, uint32_t w, uint32_t h) {
 }
 }  // namespace
 
-extern "C" void title_diag_draw(uint32_t color_base, uint32_t color_size) {
+extern "C" void title_diag_draw_slow(uint32_t color_base, uint32_t color_size) {
     if (!diag_on()) return;
     uint32_t base = color_base & 0xFFFFFF00u;
     uint32_t w = 0, h = 0;
@@ -191,19 +189,19 @@ extern "C" void title_diag_draw(uint32_t color_base, uint32_t color_size) {
     g_rt[g_rt_n++] = {base, w, h, 1};
 }
 
-extern "C" void title_diag_draw_skip(int why) {
+extern "C" void title_diag_draw_skip_slow(int why) {
     if (!diag_on()) return;
     if (why == 1) g_skip_index++;
     else if (why == 2) g_skip_compute++;
 }
 
-extern "C" void title_diag_indirect(uint32_t dwords) {
+extern "C" void title_diag_indirect_slow(uint32_t dwords) {
     if (!diag_on()) return;
     g_indirect++;
     g_indirect_words += dwords;
 }
 
-extern "C" void title_diag_scanout(uint32_t addr, uint32_t width, uint32_t height, uint32_t format) {
+extern "C" void title_diag_scanout_slow(uint32_t addr, uint32_t width, uint32_t height, uint32_t format) {
     if (!diag_on()) return;
     g_scans++;
     g_scan_w = width;
@@ -213,15 +211,15 @@ extern "C" void title_diag_scanout(uint32_t addr, uint32_t width, uint32_t heigh
     note_max_area(g_scan_max_w, g_scan_max_h, width, height);
 }
 
-extern "C" void title_diag_clear(uint32_t mask, uint32_t width, uint32_t height) {
+extern "C" void title_diag_clear_slow(uint32_t mask, uint32_t width, uint32_t height) {
     if (!diag_on()) return;
     (void)mask;
     g_clears++;
     note_max_area(g_clear_w, g_clear_h, width, height);
 }
 
-extern "C" void title_diag_ax(uint32_t playing, uint32_t linked_ppc, uint32_t linked_dsp, uint32_t mask_tv,
-                              uint32_t peak_mix, uint32_t peak_lr, uint32_t peak_other, uint32_t flags) {
+extern "C" void title_diag_ax_slow(uint32_t playing, uint32_t linked_ppc, uint32_t linked_dsp, uint32_t mask_tv,
+                                   uint32_t peak_mix, uint32_t peak_lr, uint32_t peak_other, uint32_t flags) {
     if (!diag_on()) return;
     atomic_max(g_ax_playing, playing);
     atomic_max(g_ax_ppc, linked_ppc);
@@ -234,24 +232,24 @@ extern "C" void title_diag_ax(uint32_t playing, uint32_t linked_ppc, uint32_t li
     g_ax_frames.fetch_add(1, std::memory_order_relaxed);
 }
 
-extern "C" void title_diag_vpad_read(uint32_t samples, uint32_t buttons) {
+extern "C" void title_diag_vpad_read_slow(uint32_t samples, uint32_t buttons) {
     if (!diag_on()) return;
     g_vpad_reads.fetch_add(1, std::memory_order_relaxed);
     g_vpad_last.store(samples, std::memory_order_relaxed);
     g_vpad_buttons.store(buttons, std::memory_order_relaxed);
 }
 
-extern "C" void title_diag_vpad_callback(uint32_t addr) {
+extern "C" void title_diag_vpad_callback_slow(uint32_t addr) {
     if (!diag_on()) return;
     g_vpad_cb.store(addr, std::memory_order_relaxed);
 }
 
-extern "C" void title_diag_vpad_invoked() {
+extern "C" void title_diag_vpad_invoked_slow() {
     if (!diag_on()) return;
     g_vpad_invoked.fetch_add(1, std::memory_order_relaxed);
 }
 
-extern "C" void title_diag_log() {
+extern "C" void title_diag_log_slow() {
     if (!diag_on()) return;
     using clock = std::chrono::steady_clock;
     static clock::time_point next = clock::time_point{};
