@@ -148,11 +148,10 @@ LatteTextureView* LatteTextureViewLookupCache::lookup(MPTR physAddr, sint32 widt
 {
 	// todo - add tileMode param to this and the other lookup functions?
 	uint32 key = _getViewBucketKey(physAddr, width, height, pitch);
-	key %= TEXTURE_VIEW_BUCKETS;
 	for (auto& it : texViewBucket[key].list)
 	{
-		if (it.format == format && it.dim == dim &&
-			it.width == width && it.height == height && it.pitch == pitch && it.physAddr == physAddr
+		if (it.physAddr == physAddr && it.format == format && it.dim == dim &&
+			it.width == width && it.height == height && it.pitch == pitch
 			&& it.firstMip == firstMip && it.numMip == numMip
 			&& it.firstSlice == firstSlice && it.numSlice == numSlice
 			)
@@ -167,10 +166,9 @@ LatteTextureView* LatteTextureViewLookupCache::lookupWithColorOrDepthType(MPTR p
 {
 	cemu_assert_debug(firstSlice == 0);
 	uint32 key = _getViewBucketKey(physAddr, width, height, pitch);
-	key %= TEXTURE_VIEW_BUCKETS;
 	for (auto& it : texViewBucket[key].list)
 	{
-		if (it.format == format && it.dim == dim && it.width == width && it.height == height && it.pitch == pitch && it.physAddr == physAddr
+		if (it.physAddr == physAddr && it.format == format && it.dim == dim && it.width == width && it.height == height && it.pitch == pitch
 			&& it.firstMip == firstMip && it.numMip == numMip
 			&& it.firstSlice == firstSlice && it.numSlice == numSlice &&
 			it.isDepth == isDepth
@@ -186,10 +184,9 @@ LatteTextureView* LatteTextureViewLookupCache::lookupWithColorOrDepthType(MPTR p
 LatteTextureView* LatteTextureViewLookupCache::lookupSlice(MPTR physAddr, sint32 width, sint32 height, sint32 pitch, sint32 firstMip, sint32 firstSlice, Latte::E_GX2SURFFMT format)
 {
 	uint32 key = _getViewBucketKey(physAddr, width, height, pitch);
-	key %= TEXTURE_VIEW_BUCKETS;
 	for (auto& it : texViewBucket[key].list)
 	{
-		if (it.width == width && it.height == height && it.pitch == pitch && it.physAddr == physAddr && it.format == format)
+		if (it.physAddr == physAddr && it.width == width && it.height == height && it.pitch == pitch && it.format == format)
 		{
 			if (firstSlice == it.firstSlice && firstMip == it.firstMip)
 				return it.view;
@@ -202,10 +199,9 @@ LatteTextureView* LatteTextureViewLookupCache::lookupSlice(MPTR physAddr, sint32
 LatteTextureView* LatteTextureViewLookupCache::lookupSliceMinSize(MPTR physAddr, sint32 minWidth, sint32 minHeight, sint32 pitch, sint32 firstMip, sint32 firstSlice, Latte::E_GX2SURFFMT format)
 {
 	uint32 key = _getViewBucketKeyNoRes(physAddr, pitch);
-	key %= TEXTURE_VIEW_BUCKETS;
 	for (auto& it : texViewBucket_nores[key].list)
 	{
-		if (it.width >= minWidth && it.height >= minHeight && it.pitch == pitch && it.physAddr == physAddr && it.format == format)
+		if (it.physAddr == physAddr && it.width >= minWidth && it.height >= minHeight && it.pitch == pitch && it.format == format)
 		{
 			if (firstSlice == it.firstSlice && firstMip == it.firstMip)
 				return it.view;
@@ -219,10 +215,9 @@ LatteTextureView* LatteTextureViewLookupCache::lookupSliceEx(MPTR physAddr, sint
 {
 	cemu_assert_debug(firstMip == 0);
 	uint32 key = _getViewBucketKey(physAddr, width, height, pitch);
-	key %= TEXTURE_VIEW_BUCKETS;
 	for (auto& it : texViewBucket[key].list)
 	{
-		if (it.width == width && it.height == height && it.pitch == pitch && it.physAddr == physAddr && it.format == format && it.isDepth == isDepth)
+		if (it.physAddr == physAddr && it.width == width && it.height == height && it.pitch == pitch && it.format == format && it.isDepth == isDepth)
 		{
 			if (firstSlice == it.firstSlice && firstMip == it.firstMip)
 				return it.view;

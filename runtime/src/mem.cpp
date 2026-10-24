@@ -20,6 +20,7 @@ uint8_t* g_mem = nullptr;
 uint8_t* memory_base = nullptr;  // Cemu-compat alias of g_mem
 
 namespace mem {
+uint64_t g_fast_commit_end = 0;
 namespace {
 // Simple first-fit allocator over [kSysBase, kSysEnd); runtime allocations are few and long-lived.
 std::mutex g_lock;
@@ -187,11 +188,14 @@ void init() {
         LOG("guest commit failed for %s at %08x size %x (err %lu); that span commits per access", r.name, r.addr,
             r.size, (unsigned long)GetLastError());
     }
+    if (covered(0x01800000ull, 0x50000000ull)) g_fast_commit_end = 0x50000000ull;
     LOG("guest commit charge %llu MB (not resident)", (unsigned long long)(charged >> 20));
+#else
+    g_fast_commit_end = 0x50000000ull;
 #endif
 }
 
-bool commit(uint32_t addr, size_t bytes, bool write) {
+bool commit_slow(uint32_t addr, size_t bytes, bool write) {
 #if !defined(_WIN32)
     if (bytes == 0) return true;
     if (!g_mem) return false;
@@ -251,8 +255,12 @@ void note_writable(uint32_t addr, bool writable) {
     uint64_t page = (uint64_t)addr & ~((uint64_t)g_page - 1);
     if (writable) {
         uint64_t cur = g_ro_page.load(std::memory_order_relaxed);
-        if (cur == page) g_ro_page.store(UINT64_MAX, std::memory_order_release);
+        if (cur == page) {
+            g_ro_page.store(UINT64_MAX, std::memory_order_release);
+            if (covered(0x01800000ull, 0x50000000ull)) g_fast_commit_end = 0x50000000ull;
+        }
     } else {
+        g_fast_commit_end = 0;
         g_ro_page.store(page, std::memory_order_release);
     }
 }

@@ -31,7 +31,12 @@ void init();
 // Already-committed pages keep their protection. POSIX guests are already mapped read/write; this
 // only checks that the span sits above the low 64 KB guard. Returns false when any page is
 // outside the guest space or still inaccessible for the requested access.
-bool commit(uint32_t addr, size_t bytes, bool write);
+extern uint64_t g_fast_commit_end;
+bool commit_slow(uint32_t addr, size_t bytes, bool write);
+inline bool commit(uint32_t addr, size_t bytes, bool write) {
+    if (__builtin_expect(addr >= 0x01800000u && (uint64_t)addr + bytes <= g_fast_commit_end, 1)) return true;
+    return commit_slow(addr, bytes, write);
+}
 #if defined(_WIN32)
 // Commit one reserved guest page after an access fault. False for the low 64 KB guard and for
 // pages that are already committed (a debug watch may have made them read-only).

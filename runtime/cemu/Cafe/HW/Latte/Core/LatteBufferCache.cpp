@@ -904,6 +904,24 @@ std::unique_ptr<VHeap> g_gpuBufferHeap = nullptr;
 std::vector<uint8> s_pageUploadBuffer;
 std::vector<class BufferCacheNode*> s_allCacheNodes;
 static class BufferCacheNode* s_lastRangeNode = nullptr;
+static constexpr uint32 NUM_BUFFER_CACHE_PAGES = (uint32)(0x100000000ULL / CACHE_PAGE_SIZE);
+static uint64 s_cachedBufferPages[NUM_BUFFER_CACHE_PAGES / 64]{};
+
+static inline void markBufferCachePages(MPTR begin, MPTR end)
+{
+	uint32 firstPage = begin / CACHE_PAGE_SIZE;
+	uint32 lastPage = end / CACHE_PAGE_SIZE;
+	for (uint32 p = firstPage; p < lastPage; p++)
+		s_cachedBufferPages[p >> 6] |= (1ULL << (p & 63));
+}
+
+static inline void unmarkBufferCachePages(MPTR begin, MPTR end)
+{
+	uint32 firstPage = begin / CACHE_PAGE_SIZE;
+	uint32 lastPage = end / CACHE_PAGE_SIZE;
+	for (uint32 p = firstPage; p < lastPage; p++)
+		s_cachedBufferPages[p >> 6] &= ~(1ULL << (p & 63));
+}
 
 void LatteBufferCache_removeSingleNodeFromTree(BufferCacheNode* node);
 
@@ -915,6 +933,7 @@ class BufferCacheNode
 public:
 	~BufferCacheNode()
 	{
+		unmarkBufferCachePages(m_rangeBegin, m_rangeEnd);
 		if (s_lastRangeNode == this)
 			s_lastRangeNode = nullptr;
 		if (m_hasCacheAlloc)
@@ -1186,6 +1205,7 @@ private:
 
 	BufferCacheNode(MPTR rangeBegin, MPTR rangeEnd): m_rangeBegin(rangeBegin), m_rangeEnd(rangeEnd)
 	{
+		markBufferCachePages(rangeBegin, rangeEnd);
 		flagInUse();
 		cemu_assert_debug(rangeBegin < rangeEnd);
 		size_t numPages = getPageCountFromRangeAligned(rangeBegin, rangeEnd);
@@ -1614,6 +1634,9 @@ void LatteBufferCache_invalidate(MPTR physAddress, uint32 size)
 void LatteBufferCache_invalidatePage(MPTR physAddress)
 {
 	cemu_assert_debug((physAddress & CACHE_PAGE_SIZE_M1) == 0);
+	uint32 page = physAddress / CACHE_PAGE_SIZE;
+	if ((s_cachedBufferPages[page >> 6] & (1ULL << (page & 63))) == 0)
+		return;
 	BufferCacheNode* node = s_lastRangeNode;
 	if (!node || physAddress < node->GetRangeBegin() || physAddress >= node->GetRangeEnd())
 	{
@@ -1652,62 +1675,53 @@ void LatteBufferCache_getStats(uint32& heapSize, uint32& allocationSize, uint32&
 
 class SparseBitset
 {
-	static inline constexpr size_t TABLE_MASK = 0xFF;
+	static inline constexpr uint32 NUM_PAGES = (uint32)(0x100000000ULL / CACHE_PAGE_SIZE);
 
 public:
-	bool Empty() const
+	SparseBitset()
 	{
-		return m_numNonEmptyVectors == 0;
+		m_dirtyPages.reserve(4096);
 	}
 
-	void Set(uint32 index)
+	bool Empty() const
 	{
-		auto& v = m_bits[index & TABLE_MASK];
-		if (!v.empty() && v.back() == index)
+		return m_dirtyPages.empty();
+	}
+
+	FORCE_INLINE void Set(uint32 index)
+	{
+		if (index >= NUM_PAGES)
 			return;
-		if (std::find(v.cbegin(), v.cend(), index) != v.end())
-			return;
-		if (v.empty())
+		uint64 mask = 1ULL << (index & 63);
+		uint64& word = m_pageBits[index >> 6];
+		if ((word & mask) == 0)
 		{
-			m_nonEmptyVectors[m_numNonEmptyVectors] = &v;
-			m_numNonEmptyVectors++;
+			word |= mask;
+			m_dirtyPages.emplace_back(index);
 		}
-		v.emplace_back(index);
 	}
 
 	template<typename TFunc>
 	void ForAllAndClear(TFunc callbackFunc)
 	{
-		auto vCurrent = m_nonEmptyVectors + 0;
-		auto vEnd = m_nonEmptyVectors + m_numNonEmptyVectors;
-		while (vCurrent < vEnd)
+		for (uint32 index : m_dirtyPages)
 		{
-			std::vector<uint32>* vec = *vCurrent;
-			vCurrent++;
-			for (const auto& it : *vec)
-				callbackFunc(it);
-			vec->clear();
+			m_pageBits[index >> 6] = 0;
+			callbackFunc(index);
 		}
-		m_numNonEmptyVectors = 0;
+		m_dirtyPages.clear();
 	}
 
 	void Clear()
 	{
-		auto vCurrent = m_nonEmptyVectors + 0;
-		auto vEnd = m_nonEmptyVectors + m_numNonEmptyVectors;
-		while (vCurrent < vEnd)
-		{
-			std::vector<uint32>* vec = *vCurrent;
-			vCurrent++;
-			vec->clear();
-		}
-		m_numNonEmptyVectors = 0;
+		for (uint32 index : m_dirtyPages)
+			m_pageBits[index >> 6] = 0;
+		m_dirtyPages.clear();
 	}
 
 private:
-	std::vector<uint32> m_bits[TABLE_MASK + 1];
-	std::vector<uint32>* m_nonEmptyVectors[TABLE_MASK + 1];
-	size_t m_numNonEmptyVectors{ 0 };
+	uint64 m_pageBits[NUM_PAGES / 64]{};
+	std::vector<uint32> m_dirtyPages;
 };
 
 FSpinlock g_spinlockDCFlushQueue;
