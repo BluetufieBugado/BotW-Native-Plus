@@ -29,12 +29,132 @@ namespace {
 thread_local GuestThread* t_current = nullptr;
 thread_local int t_exec_depth = 0;
 thread_local int t_exec_core = -1;
-std::mutex g_exec[3];
+thread_local uint64_t t_exec_acquire_ns = 0;
+
+static inline uint64_t sched_now_ns() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+struct CoreExec {
+    std::mutex m;
+    std::condition_variable cv;
+    GuestThread* owner = nullptr;
+    uint64_t next_ticket = 0;
+    struct Waiter {
+        GuestThread* t;
+        int prio;
+        uint64_t ticket;
+    };
+    std::vector<Waiter> waiters;
+    std::atomic<int> total_waiters{0};
+    std::atomic<int> min_waiter_prio{32};
+    std::atomic<uint64_t> wake_high_until_ns{0};
+
+    void recompute_min_locked() {
+        int mp = 32;
+        for (const auto& w : waiters) {
+            if (w.prio < mp) mp = w.prio;
+        }
+        min_waiter_prio.store(mp, std::memory_order_release);
+        total_waiters.store((int)waiters.size(), std::memory_order_release);
+    }
+
+    void lock(GuestThread* t) {
+        int p = t ? std::clamp((int)t->prio, 0, 31) : 16;
+        std::unique_lock<std::mutex> lk(m);
+        if (p <= 17) {
+            wake_high_until_ns.store(0, std::memory_order_relaxed);
+        }
+        auto can_acquire = [&](uint64_t my_ticket) -> bool {
+            if (owner != nullptr) return false;
+            for (const auto& w : waiters) {
+                if (w.t == t) continue;
+                if (w.prio < p) return false;
+                if (w.prio == p && w.ticket < my_ticket) return false;
+            }
+            if (p >= 18) {
+                uint64_t until = wake_high_until_ns.load(std::memory_order_relaxed);
+                if (until != 0 && sched_now_ns() < until) return false;
+            }
+            return true;
+        };
+        if (waiters.empty() && can_acquire(0)) {
+            owner = t;
+            return;
+        }
+        uint64_t ticket = ++next_ticket;
+        waiters.push_back({t, p, ticket});
+        recompute_min_locked();
+        for (;;) {
+            if (can_acquire(ticket)) break;
+            uint64_t until = (p >= 18) ? wake_high_until_ns.load(std::memory_order_relaxed) : 0;
+            if (owner == nullptr && until != 0) {
+                uint64_t cur = sched_now_ns();
+                if (cur < until) {
+                    uint64_t rem = std::min<uint64_t>(until - cur, 150000ull);
+                    cv.wait_for(lk, std::chrono::nanoseconds(rem));
+                    continue;
+                }
+            }
+            cv.wait(lk);
+        }
+        for (size_t i = 0; i < waiters.size(); i++) {
+            if (waiters[i].ticket == ticket) {
+                waiters.erase(waiters.begin() + i);
+                break;
+            }
+        }
+        recompute_min_locked();
+        owner = t;
+    }
+
+    void unlock() {
+        std::unique_lock<std::mutex> lk(m);
+        owner = nullptr;
+        if (!waiters.empty()) {
+            cv.notify_all();
+        }
+    }
+};
+
+CoreExec g_exec[3];
 std::unordered_map<uint32_t, GuestThread*> g_threads;  // OSThread* -> thread
 uint16_t g_next_id = 1;
 constexpr size_t kHostStack = 64u << 20;  // guest recursion maps onto the host stack
 
 int core_index(int core) { return core >= 0 && core <= 2 ? core : 1; }
+
+int pick_core(uint32_t aff, int32_t prio, int fallback_core) {
+    aff &= 7u;
+    if (aff == 1) return 0;
+    if (aff == 2) return 1;
+    if (aff == 4) return 2;
+    if (aff == 5) return 0;  // Core 0 | Core 2: never place on Core 1
+    if (aff == 3) return (prio >= 18) ? 0 : core_index(fallback_core == 2 ? 0 : fallback_core);
+    if (aff == 6) return (prio >= 18) ? 2 : core_index(fallback_core == 0 ? 2 : fallback_core);
+    // aff == 7 or 0 (any core): keep background threads off Core 1
+    if (prio >= 18) return (fallback_core == 2) ? 2 : 0;
+    return core_index(fallback_core);
+}
+
+void apply_host_priority(GuestThread* t) {
+    if (!t) return;
+#if defined(_WIN32)
+    HANDLE h = (t == t_current) ? GetCurrentThread() : (HANDLE)t->win_handle;
+    if (!h) return;
+    int win_prio = THREAD_PRIORITY_NORMAL;
+    if (t->is_main || t->name == "AX" || t->name == "alarms" || t->name == "GX2 callbacks") {
+        win_prio = THREAD_PRIORITY_HIGHEST;
+    } else if (t->prio <= 17) {
+        win_prio = THREAD_PRIORITY_ABOVE_NORMAL;
+    } else if (t->prio >= 19) {
+        win_prio = THREAD_PRIORITY_BELOW_NORMAL;
+    }
+    SetThreadPriority(h, win_prio);
+#endif
+}
 
 void run_thread(GuestThread* t) {
     t_current = t;
@@ -46,6 +166,7 @@ void run_thread(GuestThread* t) {
         std::lock_guard<std::mutex> l(g_klock);
         t->win_handle = dup;
     }
+    apply_host_priority(t);
 #endif
     // The game's main thread and the light timing threads (audio, alarms, GX2 callbacks) get the highest QoS so
     // the scheduler keeps them on performance cores (a phone has two); worker threads one step below.
@@ -57,9 +178,10 @@ void run_thread(GuestThread* t) {
 #endif
     botw_set_thread_name(t->name.empty() ? "guest" : t->name.c_str());
     int core = core_index(t->core);
-    g_exec[core].lock();
+    g_exec[core].lock(t);
     t_exec_core = core;
     t_exec_depth = 1;
+    t_exec_acquire_ns = sched_now_ns();
     LOG("thread %s running (entry %08x core %d prio %d)", t->name.empty() ? "guest" : t->name.c_str(), t->entry, t->core,
         t->os ? (int)mem::r32(t->os + T_BASEPRIO) : -1);
     PPCContext* c = &t->ctx;
@@ -113,9 +235,139 @@ void launch(GuestThread* t) {
 GuestThread* current() { return t_current; }
 const char* current_name() { return t_current ? t_current->name.c_str() : nullptr; }
 
+
+static constexpr bool kEnablePerfDiag = false;
+
+struct SignalInfo {
+    uint32_t obj = 0;
+    const char* thread_name = "?";
+    int core = -1;
+    uint32_t lr = 0;
+};
+static SignalInfo g_sig_table[256];
+
+void note_signal(uint32_t obj) {
+    if constexpr (!kEnablePerfDiag) return;
+    GuestThread* me = t_current;
+    auto& s = g_sig_table[(obj >> 2) & 255];
+    s.obj = obj;
+    s.thread_name = (me && !me->name.empty()) ? me->name.c_str() : "host";
+    s.core = me ? me->core : -1;
+    s.lr = me ? me->ctx.lr : 0;
+}
+
+struct FrameWaitEvent {
+    const char* what;
+    uint32_t obj;
+    uint64_t ns;
+    uint32_t lr;
+    const char* sig_name;
+    int sig_core;
+    uint32_t sig_lr;
+};
+static std::mutex g_diag_frame_mu;
+static std::vector<FrameWaitEvent> g_cur_frame_waits;
+static uint64_t g_cur_frame_wait_ns = 0;
+static uint64_t g_cur_frame_exec1_wait_ns = 0;
+static const char* g_last_core1_other = "none";
+static uint32_t g_last_core1_other_lr = 0;
+
+void diag_on_frame(double frame_ms, size_t frame_idx) {
+    if constexpr (!kEnablePerfDiag) return;
+    std::lock_guard<std::mutex> l(g_diag_frame_mu);
+    if (frame_ms >= 13.5 && frame_idx > 0) {
+        char buf[1536];
+        int k = snprintf(buf, sizeof(buf),
+            "SLOW_FRAME[%llu]: total=%.2f ms, waits=%.2f ms, exec1_lock=%.2f ms (holder=%s lr=%08x), cpu=%.2f ms |",
+            (unsigned long long)frame_idx, frame_ms, g_cur_frame_wait_ns / 1e6, g_cur_frame_exec1_wait_ns / 1e6,
+            g_last_core1_other, g_last_core1_other_lr,
+            frame_ms - (g_cur_frame_wait_ns + g_cur_frame_exec1_wait_ns) / 1e6);
+        for (auto& e : g_cur_frame_waits) {
+            if (e.ns >= 200000 && k < (int)sizeof(buf) - 140) {
+                k += snprintf(buf + k, sizeof(buf) - k,
+                    " [%s obj=%08x %.2fms lr=%08x <- %s(c%d,lr=%08x)]",
+                    e.what, e.obj, e.ns / 1e6, e.lr, e.sig_name, e.sig_core, e.sig_lr);
+            }
+        }
+        LOG("%s", buf);
+    }
+    g_cur_frame_waits.clear();
+    g_cur_frame_wait_ns = 0;
+    g_cur_frame_exec1_wait_ns = 0;
+}
+
+void diag_dump_threads() {
+    if constexpr (!kEnablePerfDiag) return;
+    std::lock_guard<std::mutex> l(g_klock);
+    LOG("=== GUEST THREAD TABLE (%llu threads) ===", (unsigned long long)g_threads.size());
+    for (auto& [os, t] : g_threads) {
+        if (!t) continue;
+        uint32_t aff = os ? mem::r32(os + T_AFFINITY) : 0;
+        uint8_t attr = os ? mem::r8(os + T_ATTR) : 0;
+        int32_t prio = os ? (int32_t)mem::r32(os + T_BASEPRIO) : 0;
+        LOG("  thr os=%08x name='%s' core=%d aff=%u attr=0x%02x prio=%d entry=%08x lr=%08x started=%d exited=%d",
+            os, t->name.c_str(), t->core, aff, attr, prio, t->entry, t->ctx.lr, (int)t->started, (int)t->exited);
+    }
+}
+
+void reserve_high_wake(int core) {
+    auto& cs = g_exec[core_index(core)];
+    cs.wake_high_until_ns.store(sched_now_ns() + 1000000ull, std::memory_order_release);
+}
+
+bool should_yield_core(GuestThread* me) {
+    if (t_exec_depth == 0 || t_exec_core < 0) return false;
+    auto& cs = g_exec[t_exec_core];
+    int p = me ? std::clamp((int)me->prio, 0, 31) : 16;
+    if (cs.min_waiter_prio.load(std::memory_order_acquire) <= p) return true;
+    if (p >= 18) {
+        uint64_t until = cs.wake_high_until_ns.load(std::memory_order_acquire);
+        if (until != 0 && sched_now_ns() < until) return true;
+    }
+    return false;
+}
+
+void maybe_preempt_current_fast() {
+    GuestThread* me = t_current;
+    if (__builtin_expect(!me || me->prio < 18 || me->held_mutex_count > 0 || t_exec_depth == 0 || t_exec_core < 0, 1)) return;
+    auto& cs = g_exec[t_exec_core];
+    if (__builtin_expect(cs.min_waiter_prio.load(std::memory_order_relaxed) <= 17 ||
+                         cs.wake_high_until_ns.load(std::memory_order_relaxed) != 0, 0)) {
+        maybe_preempt(me);
+    }
+}
+
+void maybe_preempt(GuestThread* me) {
+    if (!me || me->held_mutex_count > 0 || me->prio < 18 || t_exec_depth == 0 || t_exec_core < 0) return;
+    auto& cs = g_exec[t_exec_core];
+    bool demand = (cs.min_waiter_prio.load(std::memory_order_acquire) <= 17);
+    if (!demand) {
+        uint64_t until = cs.wake_high_until_ns.load(std::memory_order_acquire);
+        if (until != 0 && sched_now_ns() < until) demand = true;
+    }
+    if (demand) {
+        exec_yield();
+        exec_resume();
+    }
+}
+
 bool exec_yield() {
     if (t_exec_depth == 0) return false;
     int core = t_exec_core;
+    if constexpr (kEnablePerfDiag) {
+        GuestThread* self = t_current;
+        if (self && self->prio >= 18 && t_exec_acquire_ns != 0) {
+            uint64_t held_ns = sched_now_ns() - t_exec_acquire_ns;
+            if (held_ns >= 2500000ull) {
+                LOG("LONG_HOLD[core=%d]: %s (prio=%d) held=%.2f ms lr=%08x",
+                    core, self->name.c_str(), self->prio, held_ns / 1e6, self->ctx.lr);
+            }
+        }
+        if (core == 1 && self && !self->is_main) {
+            g_last_core1_other = self->name.c_str();
+            g_last_core1_other_lr = self->ctx.lr;
+        }
+    }
     t_exec_depth = 0;
     g_exec[core].unlock();
     return true;
@@ -127,7 +379,22 @@ void exec_resume() {
     int core = t_exec_core;
     if (self) core = core_index(self->core);
     t_exec_core = core;
-    g_exec[core].lock();
+    if constexpr (kEnablePerfDiag) {
+        bool is_main = (self && self->is_main);
+        auto t0 = is_main ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        g_exec[core].lock(self);
+        t_exec_acquire_ns = sched_now_ns();
+        if (is_main) {
+            uint64_t ns = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+            std::lock_guard<std::mutex> l(g_diag_frame_mu);
+            g_cur_frame_exec1_wait_ns += ns;
+        } else if (core == 1 && self) {
+            g_last_core1_other = self->name.c_str();
+            g_last_core1_other_lr = self->ctx.lr;
+        }
+    } else {
+        g_exec[core].lock(self);
+    }
     t_exec_depth = 1;
 }
 
@@ -148,7 +415,19 @@ std::mutex g_wait_stats_lock;
 std::vector<std::pair<const char*, uint64_t>> g_wait_stats;  // kind -> ns
 auto g_wait_stats_t0 = std::chrono::steady_clock::now();
 }  // namespace
-void note_main_wait(const char* kind, uint64_t ns) {
+void note_main_wait(const char* kind, uint32_t obj, uint32_t lr, uint64_t ns) {
+    if constexpr (kEnablePerfDiag) {
+        std::lock_guard<std::mutex> dl(g_diag_frame_mu);
+        g_cur_frame_wait_ns += ns;
+        auto& sig = g_sig_table[(obj >> 2) & 255];
+        g_cur_frame_waits.push_back({kind, obj, ns, lr,
+            sig.obj == obj ? sig.thread_name : "?",
+            sig.obj == obj ? sig.core : -1,
+            sig.obj == obj ? sig.lr : 0});
+    } else {
+        (void)obj;
+        (void)lr;
+    }
     std::lock_guard<std::mutex> l(g_wait_stats_lock);
     for (auto& [k, v] : g_wait_stats)
         if (k == kind) {
@@ -431,6 +710,7 @@ GuestThread* adopt_host_thread(const char* name, uint32_t stack_size, int core) 
     uint32_t stack = mem::sys_alloc(stack_size, 16);
     t->name = name;
     t->core = core;
+    t->prio = 0;
     t->started = true;
     t->suspend = 0;
     std::lock_guard<std::mutex> l(g_klock);
@@ -439,6 +719,7 @@ GuestThread* adopt_host_thread(const char* name, uint32_t stack_size, int core) 
     t->ctx.thread = t;
     g_threads[t->os] = t;
     t_current = t;
+    apply_host_priority(t);
     return t;
 }
 
@@ -520,15 +801,14 @@ HLE_EXPORT(coreinit, OSCreateThread) {
     int32_t prio = (int32_t)ARG(6);
     uint32_t attr = ARG(7);
     GuestThread* me = current();
-    int core = me ? me->core : 1;
+    int fallback_core = me ? me->core : 1;
     uint32_t aff = attr & 7;
-    if (aff == 1) core = 0;
-    else if (aff == 2) core = 1;
-    else if (aff == 4) core = 2;
+    int core = pick_core(aff, prio, fallback_core);
     GuestThread* t = new GuestThread;
     t->os = os;
     t->entry = entry;
     t->core = core;
+    t->prio = prio;
     t->name = "thread";
     {
         std::lock_guard<std::mutex> l(g_klock);
@@ -548,6 +828,7 @@ HLE_EXPORT(coreinit, OSCreateThread) {
         mem::w32(os + 0x1DC, core);
         init_context(&t->ctx, stack_top, core);
         t->ctx.thread = t;
+        t->ctx.pad_ = (prio >= 18) ? 1u : 0u;
         t->ctx.r[3] = argc;
         t->ctx.r[4] = argv;
         if (GuestThread* old = get(os)) {
@@ -621,10 +902,17 @@ HLE_EXPORT(coreinit, OSSetThreadName) {
 
 HLE_EXPORT(coreinit, OSSetThreadPriority) {
     uint32_t os = ARG(0);
-    int32_t prev = (int32_t)mem::r32(os + T_BASEPRIO);
-    mem::w32(os + T_BASEPRIO, ARG(1));
-    mem::w32(os + T_EFFPRIO, ARG(1));
-    (void)prev;
+    int32_t new_prio = (int32_t)ARG(1);
+    mem::w32(os + T_BASEPRIO, new_prio);
+    mem::w32(os + T_EFFPRIO, new_prio);
+    {
+        std::lock_guard<std::mutex> l(g_klock);
+        if (GuestThread* t = get(os)) {
+            t->prio = new_prio;
+            t->ctx.pad_ = (new_prio >= 18 && !t->is_main) ? 1u : 0u;
+            apply_host_priority(t);
+        }
+    }
     RET(1);
 }
 HLE_EXPORT(coreinit, OSGetThreadPriority) { RET(mem::r32(ARG(0) + T_BASEPRIO)); }
@@ -632,12 +920,27 @@ HLE_EXPORT(coreinit, OSGetThreadPriority) { RET(mem::r32(ARG(0) + T_BASEPRIO)); 
 HLE_EXPORT(coreinit, OSSetThreadAffinity) {
     uint32_t os = ARG(0), aff = ARG(1) & 7;
     mem::w32(os + T_AFFINITY, aff);
-    std::lock_guard<std::mutex> l(g_klock);
-    if (GuestThread* t = get(os)) {
-        if (aff == 1) t->core = 0;
-        else if (aff == 2) t->core = 1;
-        else if (aff == 4) t->core = 2;
-        t->ctx.core = t->core;
+    GuestThread* me = current();
+    GuestThread* target = nullptr;
+    int new_core = 1;
+    {
+        std::lock_guard<std::mutex> l(g_klock);
+        target = get(os);
+        if (target) {
+            new_core = pick_core(aff, target->prio, target->core);
+            if (target != me) {
+                target->core = new_core;
+                target->ctx.core = new_core;
+                mem::w32(os + 0x1DC, new_core);
+            }
+        }
+    }
+    if (target && target == me && target->core != new_core) {
+        bool was_holding = threads::exec_yield();
+        target->core = new_core;
+        target->ctx.core = new_core;
+        mem::w32(os + 0x1DC, new_core);
+        if (was_holding) threads::exec_resume();
     }
     RET(1);
 }
@@ -658,12 +961,9 @@ HLE_EXPORT(coreinit, OSGetCoreId) { RET(c ? (uint32_t)c->core : (current() ? cur
 HLE_EXPORT(coreinit, OSGetStackPointer) { RET(c->r[1]); }
 HLE_EXPORT(coreinit, OSYieldThread) {
     diag_sync("yield");
+    GuestThread* me = current();
+    if (!threads::should_yield_core(me)) return;
     threads::exec_yield();
-#if defined(_WIN32)
-    SwitchToThread();
-#else
-    sched_yield();
-#endif
     threads::exec_resume();
 }
 HLE_EXPORT(coreinit, OSBlockThreadsOnExit) {}
@@ -739,3 +1039,5 @@ uint32_t cemu_core_callback(uint32_t fn, std::initializer_list<uint32_t> args) {
     }
     return guest_call(&t->ctx, fn, args);
 }
+
+

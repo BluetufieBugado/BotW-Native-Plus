@@ -193,6 +193,11 @@ int main(int argc, char** argv) {
     }
     mods::init(g_game_root, g_user_root, use_mods);  // content mods and DLC (docs/mods.md)
 #if defined(_WIN32)
+    if (HMODULE winmm = LoadLibraryA("winmm.dll")) {
+        using TimeBeginPeriodFn = UINT(WINAPI*)(UINT);
+        if (auto fn = (TimeBeginPeriodFn)GetProcAddress(winmm, "timeBeginPeriod")) fn(1);
+    }
+    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
     // Before mem::init, so the first guest touch can commit its page.
     AddVectoredExceptionHandler(1, on_vectored_exception);
 #else

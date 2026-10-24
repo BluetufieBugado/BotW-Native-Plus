@@ -121,24 +121,50 @@ struct FlatSyncMap {
 struct SyncCV {
     std::condition_variable cv;
     int waiters = 0;
+    int high_core_waiters[3]{0, 0, 0};
 };
 FlatSyncMap<SyncCV> g_cvs;
 
 struct WaiterScope {
-    int& count;
-    WaiterScope(int& c) : count(c) { ++count; }
-    ~WaiterScope() { --count; }
+    SyncCV& scv;
+    int high_core = -1;
+    WaiterScope(SyncCV& s) : scv(s) {
+        ++scv.waiters;
+        GuestThread* t = threads::current();
+        if (t && t->prio <= 17 && t->core >= 0 && t->core <= 2) {
+            high_core = t->core;
+            ++scv.high_core_waiters[high_core];
+        }
+    }
+    ~WaiterScope() {
+        --scv.waiters;
+        if (high_core >= 0) {
+            --scv.high_core_waiters[high_core];
+        }
+    }
 };
 
 inline void notify_one_if_waiting(uint32_t obj) {
+    threads::note_signal(obj);
     if (SyncCV* s = g_cvs.find_existing(obj)) {
-        if (s->waiters > 0) s->cv.notify_one();
+        if (s->waiters > 0) {
+            for (int c = 0; c < 3; c++) {
+                if (s->high_core_waiters[c] > 0) threads::reserve_high_wake(c);
+            }
+            s->cv.notify_one();
+        }
     }
 }
 
 inline void notify_all_if_waiting(uint32_t obj) {
+    threads::note_signal(obj);
     if (SyncCV* s = g_cvs.find_existing(obj)) {
-        if (s->waiters > 0) s->cv.notify_all();
+        if (s->waiters > 0) {
+            for (int c = 0; c < 3; c++) {
+                if (s->high_core_waiters[c] > 0) threads::reserve_high_wake(c);
+            }
+            s->cv.notify_all();
+        }
     }
 }
 
@@ -183,6 +209,7 @@ __attribute__((noinline)) void mutex_lock_contended(GuestThread* me, uint32_t m,
         GuestThread* expected = nullptr;
         if (s->owner.compare_exchange_strong(expected, me, std::memory_order_acquire, std::memory_order_relaxed)) {
             s->count = 1;
+            if (me) me->held_mutex_count++;
             return;
         }
         if (expected == me) {
@@ -195,6 +222,7 @@ __attribute__((noinline)) void mutex_lock_contended(GuestThread* me, uint32_t m,
         expected = nullptr;
         if (s->owner.compare_exchange_strong(expected, me, std::memory_order_acquire, std::memory_order_relaxed)) {
             s->count = 1;
+            if (me) me->held_mutex_count++;
             return;
         }
         if (expected == me) {
@@ -219,6 +247,7 @@ inline void mutex_lock(PPCContext* c, uint32_t m) {
     if (__builtin_expect(
             s->owner.compare_exchange_strong(expected, me, std::memory_order_acquire, std::memory_order_relaxed), 1)) {
         s->count = 1;
+        if (me) me->held_mutex_count++;
         return;
     }
     mutex_lock_contended(me, m, s);
@@ -235,6 +264,7 @@ inline bool mutex_trylock(PPCContext* c, uint32_t m) {
     GuestThread* expected = nullptr;
     if (s->owner.compare_exchange_strong(expected, me, std::memory_order_acquire, std::memory_order_relaxed)) {
         s->count = 1;
+        if (me) me->held_mutex_count++;
         return true;
     }
     return false;
@@ -255,14 +285,23 @@ inline void mutex_unlock(PPCContext* c, uint32_t m) {
     if (--s->count == 0) {
         s->owner.store(nullptr, std::memory_order_seq_cst);
         if (__builtin_expect(s->waiters.load(std::memory_order_seq_cst) > 0, 0)) mutex_unlock_wake(s);
+        if (me) {
+            if (--me->held_mutex_count <= 0) {
+                me->held_mutex_count = 0;
+                if (__builtin_expect(me->prio >= 18, 0)) threads::maybe_preempt(me);
+            }
+        }
     }
 }
 
 void mutex_init(PPCContext* c, uint32_t m) {
     GuestThread* me = c && c->thread ? (GuestThread*)c->thread : threads::current();
     MutexState* s = get_mutex_fast(me, m);
+    GuestThread* prev = s->owner.exchange(nullptr, std::memory_order_release);
+    if (prev && s->count > 0 && prev->held_mutex_count > 0) {
+        prev->held_mutex_count--;
+    }
     s->count = 0;
-    s->owner.store(nullptr, std::memory_order_release);
 }
 }  // namespace
 
@@ -347,6 +386,8 @@ HLE_EXPORT(coreinit, OSSignalEvent) {
     if (__builtin_expect(__atomic_load_n(wait_ptr, __ATOMIC_SEQ_CST) != 0u, 0)) {
         event_signal_wake(e, *(const uint32_t*)(g_mem + e + 0x20));
     }
+    GuestThread* me = c && c->thread ? (GuestThread*)c->thread : threads::current();
+    if (__builtin_expect(me && me->prio >= 18, 0)) threads::maybe_preempt(me);
 }
 HLE_EXPORT(coreinit, OSResetEvent) {
     uint32_t* val_ptr = (uint32_t*)(g_mem + ARG(0) + 0x0C);
@@ -354,7 +395,11 @@ HLE_EXPORT(coreinit, OSResetEvent) {
 }
 HLE_EXPORT(coreinit, OSWaitEvent) {
     uint32_t e = ARG(0);
-    if (__builtin_expect(event_try_consume(e), 1)) return;
+    if (__builtin_expect(event_try_consume(e), 1)) {
+        GuestThread* me = c && c->thread ? (GuestThread*)c->thread : threads::current();
+        if (__builtin_expect(me && me->prio >= 18, 0)) threads::maybe_preempt(me);
+        return;
+    }
     threads::CoreHandoff handoff;
     std::unique_lock<std::mutex> l(g_klock);
     if (!event_try_consume(e)) {
@@ -365,7 +410,7 @@ HLE_EXPORT(coreinit, OSWaitEvent) {
         if (!event_try_consume(e)) {
             threads::WaitMark w("event", e);
             SyncCV& scv = g_cvs.get(e);
-            WaiterScope ws(scv.waiters);
+            WaiterScope ws(scv);
             EventWaiterScope ews(e);
             scv.cv.wait(l, [&] { return event_try_consume(e); });
         }
@@ -399,7 +444,7 @@ HLE_EXPORT(coreinit, OSWaitEventWithTimeout) {
         if (!ok) {
             threads::WaitMark w("event/timeout", e);
             SyncCV& scv = g_cvs.get(e);
-            WaiterScope ws(scv.waiters);
+            WaiterScope ws(scv);
             EventWaiterScope ews(e);
             ok = scv.cv.wait_for(l, std::chrono::nanoseconds(ns), [&] { return event_try_consume(e); });
         }
@@ -427,7 +472,7 @@ HLE_EXPORT(coreinit, OSWaitSemaphore) {
         if ((int32_t)mem::r32(s + 0x0C) <= 0) {
             threads::WaitMark w("semaphore", s);
             SyncCV& scv = g_cvs.get(s);
-            WaiterScope ws(scv.waiters);
+            WaiterScope ws(scv);
             scv.cv.wait(l, [&] { return (int32_t)mem::r32(s + 0x0C) > 0; });
         }
     }
@@ -473,7 +518,7 @@ HLE_EXPORT(coreinit, OSWaitRendezvous) {
         if (!ready()) {
             threads::WaitMark w("rendezvous", r);
             SyncCV& scv = g_cvs.get(r);
-            WaiterScope ws(scv.waiters);
+            WaiterScope ws(scv);
             scv.cv.wait(l, ready);
         }
     }
@@ -518,7 +563,7 @@ HLE_EXPORT(coreinit, OSSendMessage) {
         if (mem::r32(q + Q_USED) >= cap) {
             threads::WaitMark w("msgq send", q);
             SyncCV& scv = g_cvs.get(q);
-            WaiterScope ws(scv.waiters);
+            WaiterScope ws(scv);
             scv.cv.wait(l, [&] { return mem::r32(q + Q_USED) < mem::r32(q + Q_CAP); });
         }
     }
@@ -558,7 +603,7 @@ HLE_EXPORT(coreinit, OSReceiveMessage) {
         if (mem::r32(q + Q_USED) == 0) {
             threads::WaitMark w("msgq receive", q);
             SyncCV& scv = g_cvs.get(q);
-            WaiterScope ws(scv.waiters);
+            WaiterScope ws(scv);
             scv.cv.wait(l, [&] { return mem::r32(q + Q_USED) != 0; });
         }
     }
