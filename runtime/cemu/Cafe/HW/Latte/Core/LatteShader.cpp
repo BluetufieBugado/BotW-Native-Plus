@@ -15,6 +15,7 @@
 #include "config/ActiveSettings.h"
 #include "Cafe/GameProfile/GameProfile.h"
 #include "util/containers/flat_hash_map.hpp"
+#include "util/containers/robin_hood.h"
 #include "util/helpers/StateHasher.h"
 #ifdef ENABLE_METAL
 #include "Cafe/HW/Latte/Renderer/Metal/LatteToMtl.h"
@@ -1059,7 +1060,23 @@ struct ShaderStateDirectHash
 
 std::vector<uint64> s_shaderStateCacheKeys;
 size_t s_shaderStateCacheCleanupIndex = 0;
-std::unordered_map< /* BotWRecomp: was robin_hood::unordered_flat_map */ uint64, ShaderStateInfo, ShaderStateDirectHash> s_shaderStateCache;
+robin_hood::unordered_flat_map<uint64, ShaderStateInfo, ShaderStateDirectHash> s_shaderStateCache;
+
+struct ShaderStateMRUEntry
+{
+	uint64 key{0};
+	ShaderStateInfo* info{nullptr};
+};
+static ShaderStateMRUEntry s_shaderStateMRU[64]{};
+
+static inline void invalidateShaderStateMRU()
+{
+	for (auto& e : s_shaderStateMRU)
+	{
+		e.key = 0;
+		e.info = nullptr;
+	}
+}
 // also benchmarked here but didn't perform better or only marginally better and not worth pulling in an extra library:
 // jg::dense_hash_map<uint64, ShaderStateInfo, FPHDirectHash>
 // folly::F14FastMap<uint64, ShaderStateInfo, FPHDirectHash>
@@ -1107,6 +1124,7 @@ void LatteSHRC_RemoveShaderStateCacheEntryByKey(uint64 key)
 			std::erase(auxVariant.geometryShader->m_shaderStateCacheKeys, key);
 	}
 	s_shaderStateCache.erase(it);
+	invalidateShaderStateMRU();
 	--g_shaderStateCacheSetCount;
 }
 
@@ -1236,10 +1254,23 @@ void LatteSHRC_UpdateActiveShaders()
 
 	ShaderStateInfo* shaderStateInfo = nullptr;
 
-	auto it = s_shaderStateCache.find(h);
-	if (it != s_shaderStateCache.end())
+	auto& mru = s_shaderStateMRU[(h ^ (h >> 12)) & 63];
+	if (mru.info && mru.key == h) [[likely]]
 	{
-		shaderStateInfo = &it->second;
+		shaderStateInfo = mru.info;
+	}
+	else
+	{
+		auto it = s_shaderStateCache.find(h);
+		if (it != s_shaderStateCache.end())
+		{
+			shaderStateInfo = &it->second;
+			mru.key = h;
+			mru.info = shaderStateInfo;
+		}
+	}
+	if (shaderStateInfo) [[likely]]
+	{
 		shaderStateInfo->lastAccessFrameCount = LatteGPUState.frameCounter;
 		uint64 combinedAuxHash = CalcCombinedAuxHash(shaderStateInfo->fetchShader, shaderStateInfo->vertexShader, shaderStateInfo->pixelShader);
 		if (shaderStateInfo->combinedAuxHash == combinedAuxHash) [[likely]]
@@ -1284,8 +1315,11 @@ void LatteSHRC_UpdateActiveShaders()
 
 	if (!shaderStateInfo)
 	{
-		// create base entry
+		// create base entry (rehash may move existing flat_map entries)
+		invalidateShaderStateMRU();
 		shaderStateInfo = &s_shaderStateCache[h];
+		mru.key = h;
+		mru.info = shaderStateInfo;
 		s_shaderStateCacheKeys.emplace_back(h);
 		shaderStateInfo->shaderError = shaderError;
 		shaderStateInfo->fetchShader = fetchShader;

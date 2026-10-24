@@ -26,6 +26,13 @@ std::map<std::string, GuestFn>& registry() {
 }
 std::string key(const char* lib, const char* name) { return std::string(lib) + "." + name; }
 
+#if defined(_WIN32)
+extern "C" char __ImageBase[];
+// Static 32-bit RVA table in BSS (38.7 MB vs 76.6 MB 64-bit pointer table): halves L3/DTLB footprint
+// and uses RIP-relative indexing on the hot indirect-call path.
+constexpr uint32_t kMaxTextSpan = 0x02500000u;
+alignas(64) static uint32_t g_text_rva[kMaxTextSpan >> 2];
+#endif
 GuestFn* g_text_table = nullptr;  // (addr - kText) >> 2
 uint32_t g_text_end = 0;
 uint32_t g_text_span = 0;
@@ -84,14 +91,30 @@ void init() {
     g_text_span = g_text_end - mem::kText;
     size_t n = g_text_span >> 2;
     g_text_table = (GuestFn*)calloc(n, sizeof(GuestFn));
-    for (uint32_t i = 0; i < g_guest_function_count; i++)
-        g_text_table[(g_guest_functions[i].addr - mem::kText) >> 2] = g_guest_functions[i].fn;
+    for (uint32_t i = 0; i < g_guest_function_count; i++) {
+        uint32_t idx = (g_guest_functions[i].addr - mem::kText) >> 2;
+        GuestFn fn = g_guest_functions[i].fn;
+        g_text_table[idx] = fn;
+#if defined(_WIN32)
+        if ((idx << 2) < kMaxTextSpan && fn) {
+            uintptr_t diff = (uintptr_t)fn - (uintptr_t)__ImageBase;
+            if (diff <= 0xFFFFFFFFu) g_text_rva[idx] = (uint32_t)diff;
+        }
+#endif
+    }
     LOG("dispatch: %u guest functions, %zu HLE exports registered", g_guest_function_count, registry().size());
 }
 
 GuestFn lookup(uint32_t addr) {
     uint32_t off = addr - mem::kText;
+#if defined(_WIN32)
+    if (__builtin_expect(off < kMaxTextSpan, 1)) {
+        uint32_t rva = g_text_rva[off >> 2];
+        return rva ? (GuestFn)(__ImageBase + rva) : nullptr;
+    }
+#else
     if (__builtin_expect(off < g_text_span, 1)) return g_text_table[off >> 2];
+#endif
     return lookup_slow(addr);
 }
 
@@ -177,6 +200,16 @@ static __attribute__((noinline)) void rt_call_slow(PPCContext* c, uint32_t targe
 
 extern "C" void rt_call(PPCContext* c, uint32_t target) {
     uint32_t off = target - mem::kText;
+#if defined(_WIN32)
+    if (__builtin_expect(off < kMaxTextSpan, 1)) {
+        uint32_t rva = g_text_rva[off >> 2];
+        if (__builtin_expect(rva != 0, 1)) {
+            GuestFn fn = (GuestFn)(__ImageBase + rva);
+            fn(c);
+            return;
+        }
+    }
+#else
     if (__builtin_expect(off < g_text_span, 1)) {
         GuestFn fn = g_text_table[off >> 2];
         if (__builtin_expect(fn != nullptr, 1)) {
@@ -184,6 +217,7 @@ extern "C" void rt_call(PPCContext* c, uint32_t target) {
             return;
         }
     }
+#endif
     rt_call_slow(c, target);
 }
 

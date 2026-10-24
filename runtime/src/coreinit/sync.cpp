@@ -144,60 +144,125 @@ inline void notify_all_if_waiting(uint32_t obj) {
 
 // ---- recursive mutexes (OSMutex and OSFastMutex share the implementation) ----------------
 struct MutexState {
-    GuestThread* owner = nullptr;
+    std::atomic<GuestThread*> owner{nullptr};
     int count = 0;
-    int waiters = 0;
+    std::atomic<int> waiters{0};
     std::condition_variable cv;
 };
 FlatSyncMap<MutexState> g_mutexes;
 
-void mutex_lock(uint32_t m) {
-    GuestThread* me = threads::current();
+struct AtomicWaiterScope {
+    std::atomic<int>& count;
+    AtomicWaiterScope(std::atomic<int>& c) : count(c) { count.fetch_add(1, std::memory_order_seq_cst); }
+    ~AtomicWaiterScope() { count.fetch_sub(1, std::memory_order_seq_cst); }
+};
+
+__attribute__((noinline)) MutexState* get_mutex_slow(GuestThread* me, uint32_t m) {
+    std::lock_guard<std::mutex> l(g_klock);
+    MutexState* s = &g_mutexes.get(m);
+    if (__builtin_expect(me != nullptr && m != 0, 1)) {
+        uint32_t slot = ((m >> 2) ^ (m >> 10)) & 63u;
+        me->mutex_cache[slot] = {m, s};
+    }
+    return s;
+}
+
+inline MutexState* get_mutex_fast(GuestThread* me, uint32_t m) {
+    if (__builtin_expect(me != nullptr && m != 0, 1)) {
+        uint32_t slot = ((m >> 2) ^ (m >> 10)) & 63u;
+        auto& ce = me->mutex_cache[slot];
+        if (__builtin_expect(ce.key == m, 1)) return (MutexState*)ce.state;
+    }
+    return get_mutex_slow(me, m);
+}
+
+__attribute__((noinline)) void mutex_lock_contended(GuestThread* me, uint32_t m, MutexState* s) {
     threads::CoreHandoff handoff;
     std::unique_lock<std::mutex> l(g_klock);
-    MutexState& s = g_mutexes.get(m);
     for (;;) {
-        if (!s.owner || s.owner == me) {
-            s.owner = me;
-            s.count++;
+        GuestThread* expected = nullptr;
+        if (s->owner.compare_exchange_strong(expected, me, std::memory_order_acquire, std::memory_order_relaxed)) {
+            s->count = 1;
+            return;
+        }
+        if (expected == me) {
+            s->count++;
             return;
         }
         l.unlock();
         handoff.yield();
         l.lock();
-        if (!s.owner || s.owner == me) continue;
+        expected = nullptr;
+        if (s->owner.compare_exchange_strong(expected, me, std::memory_order_acquire, std::memory_order_relaxed)) {
+            s->count = 1;
+            return;
+        }
+        if (expected == me) {
+            s->count++;
+            return;
+        }
         threads::WaitMark w("mutex", m);
-        WaiterScope ws(s.waiters);
-        s.cv.wait(l, [&] { return s.owner == nullptr; });
+        AtomicWaiterScope ws(s->waiters);
+        s->cv.wait(l, [&] { return s->owner.load(std::memory_order_acquire) == nullptr; });
     }
 }
-bool mutex_trylock(uint32_t m) {
-    GuestThread* me = threads::current();
-    std::lock_guard<std::mutex> l(g_klock);
-    MutexState& s = g_mutexes.get(m);
-    if (s.owner && s.owner != me) return false;
-    s.owner = me;
-    s.count++;
-    return true;
+
+inline void mutex_lock(PPCContext* c, uint32_t m) {
+    GuestThread* me = c && c->thread ? (GuestThread*)c->thread : threads::current();
+    MutexState* s = get_mutex_fast(me, m);
+    GuestThread* cur = s->owner.load(std::memory_order_relaxed);
+    if (__builtin_expect(cur == me && me != nullptr, 0)) {
+        s->count++;
+        return;
+    }
+    GuestThread* expected = nullptr;
+    if (__builtin_expect(
+            s->owner.compare_exchange_strong(expected, me, std::memory_order_acquire, std::memory_order_relaxed), 1)) {
+        s->count = 1;
+        return;
+    }
+    mutex_lock_contended(me, m, s);
 }
-void mutex_unlock(uint32_t m) {
-    GuestThread* me = threads::current();
+
+inline bool mutex_trylock(PPCContext* c, uint32_t m) {
+    GuestThread* me = c && c->thread ? (GuestThread*)c->thread : threads::current();
+    MutexState* s = get_mutex_fast(me, m);
+    GuestThread* cur = s->owner.load(std::memory_order_relaxed);
+    if (cur == me && me != nullptr) {
+        s->count++;
+        return true;
+    }
+    GuestThread* expected = nullptr;
+    if (s->owner.compare_exchange_strong(expected, me, std::memory_order_acquire, std::memory_order_relaxed)) {
+        s->count = 1;
+        return true;
+    }
+    return false;
+}
+
+__attribute__((noinline)) void mutex_unlock_wake(MutexState* s) {
     std::lock_guard<std::mutex> l(g_klock);
-    MutexState& s = g_mutexes.get(m);
-    if (__builtin_expect(s.owner != me, 0)) {
+    if (s->waiters.load(std::memory_order_relaxed) > 0) s->cv.notify_one();
+}
+
+inline void mutex_unlock(PPCContext* c, uint32_t m) {
+    GuestThread* me = c && c->thread ? (GuestThread*)c->thread : threads::current();
+    MutexState* s = get_mutex_fast(me, m);
+    if (__builtin_expect(s->owner.load(std::memory_order_relaxed) != me, 0)) {
         LOG("mutex %08x unlocked by a non-owner (%s)", m, me ? me->name.c_str() : "?");
         return;
     }
-    if (--s.count == 0) {
-        s.owner = nullptr;
-        if (__builtin_expect(s.waiters > 0, 0)) s.cv.notify_one();
+    if (--s->count == 0) {
+        s->owner.store(nullptr, std::memory_order_seq_cst);
+        if (__builtin_expect(s->waiters.load(std::memory_order_seq_cst) > 0, 0)) mutex_unlock_wake(s);
     }
 }
-void mutex_init(uint32_t m) {
-    std::lock_guard<std::mutex> l(g_klock);
-    MutexState& s = g_mutexes.get(m);
-    s.owner = nullptr;
-    s.count = 0;
+
+void mutex_init(PPCContext* c, uint32_t m) {
+    GuestThread* me = c && c->thread ? (GuestThread*)c->thread : threads::current();
+    MutexState* s = get_mutex_fast(me, m);
+    s->count = 0;
+    s->owner.store(nullptr, std::memory_order_release);
 }
 }  // namespace
 
@@ -206,35 +271,35 @@ HLE_EXPORT(coreinit, OSInitMutex) {
     mem::commit(m, 0x2C, true);
     memset(mem::host(m), 0, 0x2C);
     mem::w32(m, 0x6D557458);  // 'mUtX'
-    mutex_init(m);
+    mutex_init(c, m);
 }
-HLE_EXPORT(coreinit, OSLockMutex) { mutex_lock(ARG(0)); }
-HLE_EXPORT(coreinit, OSTryLockMutex) { RET(mutex_trylock(ARG(0))); }
-HLE_EXPORT(coreinit, OSUnlockMutex) { mutex_unlock(ARG(0)); }
+HLE_EXPORT(coreinit, OSLockMutex) { mutex_lock(c, ARG(0)); }
+HLE_EXPORT(coreinit, OSTryLockMutex) { RET(mutex_trylock(c, ARG(0))); }
+HLE_EXPORT(coreinit, OSUnlockMutex) { mutex_unlock(c, ARG(0)); }
 HLE_EXPORT(coreinit, OSFastMutex_Init) {
     mem::commit(ARG(0), 0x2C, true);
     memset(mem::host(ARG(0)), 0, 0x2C);
     mem::w32(ARG(0), 0x664D7458);  // 'fMtX'
-    mutex_init(ARG(0));
+    mutex_init(c, ARG(0));
 }
-HLE_EXPORT(coreinit, OSFastMutex_Lock) { mutex_lock(ARG(0)); }
-HLE_EXPORT(coreinit, OSFastMutex_TryLock) { RET(mutex_trylock(ARG(0))); }
-HLE_EXPORT(coreinit, OSFastMutex_Unlock) { mutex_unlock(ARG(0)); }
+HLE_EXPORT(coreinit, OSFastMutex_Lock) { mutex_lock(c, ARG(0)); }
+HLE_EXPORT(coreinit, OSFastMutex_TryLock) { RET(mutex_trylock(c, ARG(0))); }
+HLE_EXPORT(coreinit, OSFastMutex_Unlock) { mutex_unlock(c, ARG(0)); }
 
 // GHS C/C++ runtime locks: one global recursive lock plus mutexes allocated per object.
-HLE_EXPORT(coreinit, __ghsLock) { mutex_lock(0xFFFF0001u); }
-HLE_EXPORT(coreinit, __ghsUnlock) { mutex_unlock(0xFFFF0001u); }
-HLE_EXPORT(coreinit, __ghs_flock_file) { mutex_lock(0xFFFE0000u + (ARG(0) & 0xFFFF)); }
-HLE_EXPORT(coreinit, __ghs_funlock_file) { mutex_unlock(0xFFFE0000u + (ARG(0) & 0xFFFF)); }
+HLE_EXPORT(coreinit, __ghsLock) { mutex_lock(c, 0xFFFF0001u); }
+HLE_EXPORT(coreinit, __ghsUnlock) { mutex_unlock(c, 0xFFFF0001u); }
+HLE_EXPORT(coreinit, __ghs_flock_file) { mutex_lock(c, 0xFFFE0000u + (ARG(0) & 0xFFFF)); }
+HLE_EXPORT(coreinit, __ghs_funlock_file) { mutex_unlock(c, 0xFFFE0000u + (ARG(0) & 0xFFFF)); }
 // __ghs_mtx_init(void** m): allocate; lock/unlock(void* m); dst(void** m)
 HLE_EXPORT(coreinit, __ghs_mtx_init) {
     uint32_t m = mem::sys_alloc(0x2C, 8);
-    mutex_init(m);
+    mutex_init(c, m);
     mem::w32(ARG(0), m);
 }
 HLE_EXPORT(coreinit, __ghs_mtx_dst) {}
-HLE_EXPORT(coreinit, __ghs_mtx_lock) { mutex_lock(ARG(0)); }
-HLE_EXPORT(coreinit, __ghs_mtx_unlock) { mutex_unlock(ARG(0)); }
+HLE_EXPORT(coreinit, __ghs_mtx_lock) { mutex_lock(c, ARG(0)); }
+HLE_EXPORT(coreinit, __ghs_mtx_unlock) { mutex_unlock(c, ARG(0)); }
 
 // ---- events: +0x0C value, +0x20 mode (0 manual reset, 1 auto reset) ----------------------
 HLE_EXPORT(coreinit, OSInitEvent) {

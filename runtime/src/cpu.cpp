@@ -117,3 +117,33 @@ extern "C" double ppc_fres(double input) {
 // GQR scale field is a 6-bit signed exponent s: dequantize multiplies by 2^-s, quantize by 2^s.
 extern "C" const float g_dequant_scale[64] = {0x1p0f, 0x1p-1f, 0x1p-2f, 0x1p-3f, 0x1p-4f, 0x1p-5f, 0x1p-6f, 0x1p-7f, 0x1p-8f, 0x1p-9f, 0x1p-10f, 0x1p-11f, 0x1p-12f, 0x1p-13f, 0x1p-14f, 0x1p-15f, 0x1p-16f, 0x1p-17f, 0x1p-18f, 0x1p-19f, 0x1p-20f, 0x1p-21f, 0x1p-22f, 0x1p-23f, 0x1p-24f, 0x1p-25f, 0x1p-26f, 0x1p-27f, 0x1p-28f, 0x1p-29f, 0x1p-30f, 0x1p-31f, 0x1p32f, 0x1p31f, 0x1p30f, 0x1p29f, 0x1p28f, 0x1p27f, 0x1p26f, 0x1p25f, 0x1p24f, 0x1p23f, 0x1p22f, 0x1p21f, 0x1p20f, 0x1p19f, 0x1p18f, 0x1p17f, 0x1p16f, 0x1p15f, 0x1p14f, 0x1p13f, 0x1p12f, 0x1p11f, 0x1p10f, 0x1p9f, 0x1p8f, 0x1p7f, 0x1p6f, 0x1p5f, 0x1p4f, 0x1p3f, 0x1p2f, 0x1p1f};
 extern "C" const float g_quant_scale[64] = {0x1p0f, 0x1p1f, 0x1p2f, 0x1p3f, 0x1p4f, 0x1p5f, 0x1p6f, 0x1p7f, 0x1p8f, 0x1p9f, 0x1p10f, 0x1p11f, 0x1p12f, 0x1p13f, 0x1p14f, 0x1p15f, 0x1p16f, 0x1p17f, 0x1p18f, 0x1p19f, 0x1p20f, 0x1p21f, 0x1p22f, 0x1p23f, 0x1p24f, 0x1p25f, 0x1p26f, 0x1p27f, 0x1p28f, 0x1p29f, 0x1p30f, 0x1p31f, 0x1p-32f, 0x1p-31f, 0x1p-30f, 0x1p-29f, 0x1p-28f, 0x1p-27f, 0x1p-26f, 0x1p-25f, 0x1p-24f, 0x1p-23f, 0x1p-22f, 0x1p-21f, 0x1p-20f, 0x1p-19f, 0x1p-18f, 0x1p-17f, 0x1p-16f, 0x1p-15f, 0x1p-14f, 0x1p-13f, 0x1p-12f, 0x1p-11f, 0x1p-10f, 0x1p-9f, 0x1p-8f, 0x1p-7f, 0x1p-6f, 0x1p-5f, 0x1p-4f, 0x1p-3f, 0x1p-2f, 0x1p-1f};
+
+// Runtime-dispatched IEEE-754 double-precision FMA for guest PowerPC fmadd/fmsub/fnmadd/fnmsub.
+// Prebuilt guest shards compiled with generic x86-64 baseline emit calls to external symbol `fma`.
+// Providing `fma` in the main executable avoids the DLL import jump into ucrtbase.dll and uses a
+// single hardware FMA3 instruction when supported at runtime, with a portable software fallback.
+#if defined(__x86_64__) || defined(_M_X64)
+static const int g_cpu_has_fma = __builtin_cpu_supports("fma");
+#endif
+
+__attribute__((noinline)) static double fma_software_fallback(double x, double y, double z) {
+#if defined(_WIN32)
+    using FmaFn = double (*)(double, double, double);
+    static const FmaFn ucrt_fma = []() -> FmaFn {
+        HMODULE m = GetModuleHandleW(L"ucrtbase.dll");
+        return m ? (FmaFn)(void*)GetProcAddress(m, "fma") : nullptr;
+    }();
+    if (ucrt_fma) return ucrt_fma(x, y, z);
+#endif
+    return (double)((long double)x * (long double)y + (long double)z);
+}
+
+extern "C" double fma(double x, double y, double z) {
+#if defined(__x86_64__) || defined(_M_X64)
+    if (__builtin_expect(g_cpu_has_fma, 1)) {
+        __asm__("vfmadd213sd %2, %1, %0" : "+x"(x) : "x"(y), "x"(z));
+        return x;
+    }
+#endif
+    return fma_software_fallback(x, y, z);
+}
