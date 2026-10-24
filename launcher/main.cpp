@@ -167,8 +167,34 @@ void load_ini() {
     A.cfg = c;
 }
 
+void write_ini(std::ostream& out);
+// Writes to a temporary file first and swaps it in, so a crash or power loss never leaves a
+// half-written ini. Tells the user once if the folder cannot be written (for example a
+// read-only or protected install folder).
 void save_ini() {
-    std::ofstream out(ini_path(), std::ios::binary | std::ios::trunc);
+    static bool warned = false;
+    fs::path tmp = ini_path();
+    tmp += L".tmp";
+    bool ok = false;
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (out) { write_ini(out); out.flush(); ok = (bool)out; }
+    }
+    if (ok) ok = MoveFileExW(tmp.c_str(), ini_path().c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    if (!ok) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
+        if (!warned) {
+            warned = true;
+            MessageBoxW(nullptr, (L"Settings could not be saved to\n" + ini_path().wstring() +
+                L"\n\nThe folder is read-only or protected. Move the game folder somewhere you can write to "
+                L"(for example your Documents folder) so your choices are kept.").c_str(),
+                kTitle, MB_OK | MB_ICONWARNING);
+        }
+    }
+}
+
+void write_ini(std::ostream& out) {
     auto line = [&](const char* k, const std::wstring& v) { out << k << "=" << narrow(v) << "\n"; };
     line("game", A.cfg.game);
     line("exe", A.cfg.exe);
@@ -840,7 +866,10 @@ void play() {
     if (!is_file(fs::path(A.cfg.game) / "code" / "U-King.rpx")) { set_status(L"The game folder is missing. Open Settings to choose it again.", kBad); return; }
     std::error_code ec;
     fs::create_directories(fs::path(A.cfg.user), ec);
-    std::wstring cmd = L"\"" + A.cfg.exe + L"\" --game \"" + A.cfg.game + L"\" --renderer vulkan";
+    // A trailing backslash right before the closing quote would escape the quote.
+    std::wstring game = A.cfg.game;
+    while (game.size() > 3 && (game.back() == L'\\' || game.back() == L'/')) game.pop_back();
+    std::wstring cmd = L"\"" + A.cfg.exe + L"\" --game \"" + game + L"\" --renderer vulkan";
     int secs = _wtoi(A.cfg.seconds.c_str());
     if (secs > 0) cmd += L" --seconds " + std::to_wstring(secs);
     if (A.cfg.fullscreen) cmd += L" --fullscreen";

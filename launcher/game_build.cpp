@@ -22,7 +22,11 @@ std::string narrow(const std::wstring& w) {
     WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
     return s;
 }
-std::wstring q(const fs::path& p) { return L"\"" + p.wstring() + L"\""; }
+std::wstring q(const fs::path& p) {
+    std::wstring s = p.wstring();
+    while (s.size() > 3 && (s.back() == L'\\' || s.back() == L'/')) s.pop_back();  // keep the closing quote
+    return L"\"" + s + L"\"";
+}
 }  // namespace
 
 Toolchain detect_toolchain() {
