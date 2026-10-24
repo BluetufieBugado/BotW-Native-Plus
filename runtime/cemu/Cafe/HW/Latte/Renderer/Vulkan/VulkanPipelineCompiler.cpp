@@ -214,8 +214,10 @@ static VkBlendFactor GetVkBlendFactor(Latte::LATTE_CB_BLENDN_CONTROL::E_BLENDFAC
 		/* 0x08 */ VK_BLEND_FACTOR_DST_COLOR,
 		/* 0x09 */ VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR,
 		/* 0x0A */ VK_BLEND_FACTOR_SRC_ALPHA_SATURATE,
-		/* 0x0B */ VK_BLEND_FACTOR_MAX_ENUM, // todo
-		/* 0x0C */ VK_BLEND_FACTOR_MAX_ENUM, // todo
+		// 0x0B/0x0C are BOTH_SRC_ALPHA / BOTH_INV_SRC_ALPHA. InitBlendState maps them.
+		// These entries are the source half, so a missed call cannot pass MAX_ENUM to Vulkan.
+		/* 0x0B */ VK_BLEND_FACTOR_SRC_ALPHA,
+		/* 0x0C */ VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
 		/* 0x0D */ VK_BLEND_FACTOR_CONSTANT_COLOR,
 		/* 0x0E */ VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR,
 		/* 0x0F */ VK_BLEND_FACTOR_SRC1_COLOR,
@@ -225,8 +227,29 @@ static VkBlendFactor GetVkBlendFactor(Latte::LATTE_CB_BLENDN_CONTROL::E_BLENDFAC
 		/* 0x13 */ VK_BLEND_FACTOR_CONSTANT_ALPHA,
 		/* 0x14 */ VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA
 	};
-	cemu_assert_debug((uint32)factor < std::size(factors));
+	if ((uint32)factor >= std::size(factors))
+		return VK_BLEND_FACTOR_ZERO;
 	return factors[(uint32)factor];
+}
+
+// GX2/D3D9 BOTH_* factors name a (src, dest) pair and, on the source slot, replace dest.
+// 0x0B: src = SRC_ALPHA, dest = ONE_MINUS_SRC_ALPHA
+// 0x0C: src = ONE_MINUS_SRC_ALPHA, dest = SRC_ALPHA
+static VkBlendFactor MapVkBlendFactor(Latte::LATTE_CB_BLENDN_CONTROL::E_BLENDFACTOR factor, bool isSource, bool& overrideDest, VkBlendFactor& forcedDest)
+{
+	using E = Latte::LATTE_CB_BLENDN_CONTROL::E_BLENDFACTOR;
+	if (factor == E::BLEND_BOTH_SRC_ALPHA || factor == E::BLEND_BOTH_INV_SRC_ALPHA)
+	{
+		const bool inv = factor == E::BLEND_BOTH_INV_SRC_ALPHA;
+		if (isSource)
+		{
+			overrideDest = true;
+			forcedDest = inv ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+			return inv ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_SRC_ALPHA;
+		}
+		return inv ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	}
+	return GetVkBlendFactor(factor);
 }
 
 bool PipelineCompiler::ConsumesBlendConstants(VkBlendFactor blendFactor)
@@ -610,13 +633,21 @@ void PipelineCompiler::InitBlendState(const LatteContextRegister& latteRegister,
 
 		entry.colorWriteMask = (renderTargetMask >> (i * 4)) & 0xF;
 		entry.colorBlendOp = GetVkBlendOp(blendControlReg.get_COLOR_COMB_FCN());
-		entry.srcColorBlendFactor = GetVkBlendFactor(blendControlReg.get_COLOR_SRCBLEND());
-		entry.dstColorBlendFactor = GetVkBlendFactor(blendControlReg.get_COLOR_DSTBLEND());
+		bool overrideColorDst = false;
+		VkBlendFactor forcedColorDst = VK_BLEND_FACTOR_ZERO;
+		entry.srcColorBlendFactor = MapVkBlendFactor(blendControlReg.get_COLOR_SRCBLEND(), true, overrideColorDst, forcedColorDst);
+		entry.dstColorBlendFactor = MapVkBlendFactor(blendControlReg.get_COLOR_DSTBLEND(), false, overrideColorDst, forcedColorDst);
+		if (overrideColorDst)
+			entry.dstColorBlendFactor = forcedColorDst;
 		if (blendControlReg.get_SEPARATE_ALPHA_BLEND())
 		{
 			entry.alphaBlendOp = GetVkBlendOp(blendControlReg.get_ALPHA_COMB_FCN());
-			entry.srcAlphaBlendFactor = GetVkBlendFactor(blendControlReg.get_ALPHA_SRCBLEND());
-			entry.dstAlphaBlendFactor = GetVkBlendFactor(blendControlReg.get_ALPHA_DSTBLEND());
+			bool overrideAlphaDst = false;
+			VkBlendFactor forcedAlphaDst = VK_BLEND_FACTOR_ZERO;
+			entry.srcAlphaBlendFactor = MapVkBlendFactor(blendControlReg.get_ALPHA_SRCBLEND(), true, overrideAlphaDst, forcedAlphaDst);
+			entry.dstAlphaBlendFactor = MapVkBlendFactor(blendControlReg.get_ALPHA_DSTBLEND(), false, overrideAlphaDst, forcedAlphaDst);
+			if (overrideAlphaDst)
+				entry.dstAlphaBlendFactor = forcedAlphaDst;
 		}
 		else
 		{
@@ -716,6 +747,16 @@ void PipelineCompiler::InitDepthStencilState()
 	bool depthEnable = LatteGPUState.contextNew.DB_DEPTH_CONTROL.get_Z_ENABLE();
 	auto depthFunc = LatteGPUState.contextNew.DB_DEPTH_CONTROL.get_Z_FUNC();
 	bool depthWriteEnable = LatteGPUState.contextNew.DB_DEPTH_CONTROL.get_Z_WRITE_ENABLE();
+	bool stencilEnableEarly = LatteGPUState.contextNew.DB_DEPTH_CONTROL.get_STENCIL_ENABLE();
+	bool backStencilEnableEarly = LatteGPUState.contextNew.DB_DEPTH_CONTROL.get_BACK_STENCIL_ENABLE();
+	// Vulkan rejects depth/stencil tests when the render pass has no depth attachment.
+	// Cemu detaches a depth buffer that is smaller than the scissor; the color target can still be valid.
+	const bool noDepthAttachment = !m_renderPassObj || m_renderPassObj->GetDepthFormat() == VK_FORMAT_UNDEFINED;
+	if (noDepthAttachment && (depthEnable || depthWriteEnable || stencilEnableEarly || backStencilEnableEarly))
+	{
+		depthEnable = false;
+		depthWriteEnable = false;
+	}
 
 	// setup VkPipelineDepthStencilStateCreateInfo
 	depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -741,8 +782,8 @@ void PipelineCompiler::InitDepthStencilState()
 	depthStencilState.maxDepthBounds = 1.0f;
 
 	// get stencil control parameters
-	bool stencilEnable = LatteGPUState.contextNew.DB_DEPTH_CONTROL.get_STENCIL_ENABLE();
-	bool backStencilEnable = LatteGPUState.contextNew.DB_DEPTH_CONTROL.get_BACK_STENCIL_ENABLE();
+	bool stencilEnable = noDepthAttachment ? false : stencilEnableEarly;
+	bool backStencilEnable = noDepthAttachment ? false : backStencilEnableEarly;
 	auto frontStencilFunc = LatteGPUState.contextNew.DB_DEPTH_CONTROL.get_STENCIL_FUNC_F();
 	auto frontStencilZPass = LatteGPUState.contextNew.DB_DEPTH_CONTROL.get_STENCIL_ZPASS_F();
 	auto frontStencilZFail = LatteGPUState.contextNew.DB_DEPTH_CONTROL.get_STENCIL_ZFAIL_F();
