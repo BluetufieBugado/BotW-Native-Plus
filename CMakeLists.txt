@@ -310,6 +310,40 @@ if(APPLE)
     "-framework CoreMedia" "-framework CoreVideo")
 endif()
 
+
+# Separate from the game. SDL3 is already a dependency; the launcher uses it only to capture
+# keys and controller buttons with the same names the runtime reads from controls.ini.
+if(WIN32)
+  set(_botw_manifest "${CMAKE_SOURCE_DIR}/launcher/app.manifest")
+  file(TO_CMAKE_PATH "${_botw_manifest}" _botw_manifest_cmake)
+  file(WRITE "${CMAKE_BINARY_DIR}/botw_launcher_manifest.rc" "1 24 \"${_botw_manifest_cmake}\"\n")
+  add_executable(BotWLauncher WIN32
+    launcher/main.cpp
+    launcher/game_info.cpp
+    launcher/mods.cpp
+    launcher/save_import.cpp
+    launcher/ui.cpp
+    launcher/unzip.cpp
+    runtime/src/input/controls_file.cpp
+    "${CMAKE_BINARY_DIR}/botw_launcher_manifest.rc")
+  target_include_directories(BotWLauncher PRIVATE launcher runtime/src)
+  target_compile_definitions(BotWLauncher PRIVATE SDL_MAIN_HANDLED UNICODE _UNICODE)
+  target_compile_options(BotWLauncher PRIVATE -O2 -Wall -Wno-unused-function -Wno-unused-variable -fwrapv)
+  if(TARGET SDL3::SDL3-shared)
+    target_link_libraries(BotWLauncher PRIVATE SDL3::SDL3-shared)
+  else()
+    target_link_libraries(BotWLauncher PRIVATE SDL3::SDL3)
+  endif()
+  target_link_libraries(BotWLauncher PRIVATE ZLIB::ZLIB comctl32 comdlg32 shell32 ole32 uxtheme dwmapi gdiplus)
+  if(MINGW)
+    # GUI subsystem, but the entry point stays main() so SDL_main is not required.
+    target_link_options(BotWLauncher PRIVATE "-Wl,-e,mainCRTStartup")
+  endif()
+  file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/BotWLauncher.cmd" CONTENT
+    "@echo off\r\nset \"PATH=C:\\msys64\\ucrt64\\bin;%PATH%\"\r\nstart \"\" \"%~dp0BotWLauncher.exe\"\r\n")
+  message(STATUS "BotWLauncher: Windows launcher (BotWLauncher.exe)")
+endif()
+
 message(STATUS "BotWRecomp backends: Metal=${BOTW_ENABLE_METAL} Vulkan=${BOTW_ENABLE_VULKAN}")
 
 # Native Metal GPU path (docs/native-renderer.md): option BOTW_NATIVE_GPU, default OFF (gpu_native.cmake).

@@ -96,4 +96,15 @@ size_t added_files();
 size_t opened_files();
 std::string summary();  // one line for the settings menu
 
+struct DiscoveredMod {
+    std::string folder;
+    std::string name;
+    std::string version;
+    bool enabled = false;    // currently enabled in mods.ini
+    bool loaded_now = false; // loaded in this game session
+};
+std::vector<DiscoveredMod> status();
+bool set_enabled(std::string_view folder, bool on);
+bool pending_restart();
+
 }  // namespace mods

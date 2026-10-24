@@ -23,8 +23,9 @@ const float kScales[] = {0, 0.5f, 0.75f, 1, 1.5f, 2, 2.5f, 3};  // 0 = fit the d
 
 // Tabs. Every setting of the previous flat list is in exactly one tab; the order inside a tab follows
 // the order of the old list. Close is appended to every tab.
-enum TabId { kTabGraphics, kTabControls, kTabAudio, kTabAbout, kTabs };
-const char* kTabNames[kTabs] = {"Graphics", "Controls", "Audio", "About"};
+enum TabId { kTabGraphics, kTabControls, kTabAudio, kTabMods, kTabAbout, kTabs };
+const char* kTabNames[kTabs] = {"Graphics", "Controls", "Audio", "Mods", "About"};
+constexpr int kModRowBase = 1000;
 const std::vector<int>& tab_rows(int t) {
     static const std::vector<int> graphics = {kFps, kScale, kDisplay, kFilter, kGamepadView, kShowFps, kMods};
     static const std::vector<int> controls = {kGyro, kRumble, kLayout, kTouch};
@@ -39,10 +40,21 @@ const std::vector<int>& tab_rows(int t) {
 }
 // Row id for a selected position in a tab; the position after the last setting is Close.
 int row_id(int t, int cursor) {
+    if (t == kTabMods) {
+        auto list = mods::status();
+        if (list.empty()) return cursor == 0 ? (int)kMods : (int)kClose;
+        return cursor >= 0 && cursor < (int)list.size() ? (kModRowBase + cursor) : (int)kClose;
+    }
     const std::vector<int>& r = tab_rows(t);
     return cursor >= 0 && cursor < (int)r.size() ? r[cursor] : (int)kClose;
 }
-int row_count(int t) { return (int)tab_rows(t).size() + 1; }
+int row_count(int t) {
+    if (t == kTabMods) {
+        auto list = mods::status();
+        return (list.empty() ? 1 : (int)list.size()) + 1;
+    }
+    return (int)tab_rows(t).size() + 1;
+}
 
 const char* kDisplays[] = {"Fit 16:9", "Stretch", "Fill (crop)"};
 const char* kFilters[] = {"Bilinear", "Bicubic", "Hermite", "Nearest"};
@@ -155,6 +167,14 @@ void change(int dir) {
         row = row_id(g_tab, g_cursor);
     }
     if (row == kClose || row == kMods) return;
+    if (row >= kModRowBase) {
+        auto list = mods::status();
+        int idx = row - kModRowBase;
+        if (idx >= 0 && idx < (int)list.size()) {
+            mods::set_enabled(list[idx].folder, !list[idx].enabled);
+        }
+        return;
+    }
     Settings s = settings::get();
     step(s, row, dir);
     settings::set(s);
@@ -167,6 +187,7 @@ void activate() {
         row = row_id(g_tab, g_cursor);
     }
     if (row == kClose) close();
+    else if (row == kMods) select_tab(kTabMods);
     else change(+1);
 }
 
@@ -214,13 +235,36 @@ View view() {
     snprintf(b, sizeof b, "%d%%", s.volume);
     all[kVolume] = {"Volume", b};
     all[kClose] = {"Close", "", true};
-    for (int id : tab_rows(tab_now)) v.rows.push_back(all[id]);
-    v.rows.push_back(all[kClose]);
+    if (tab_now == kTabMods) {
+        auto list = mods::status();
+        if (list.empty()) {
+            v.rows.push_back({"Mods folder", mods::disabled_by_flag() ? "Off (--no-mods)" : "No mods found in mods/", false, true});
+        } else {
+            for (const auto& m : list) {
+                std::string label = m.name;
+                if (!m.version.empty()) label += " (v" + m.version + ")";
+                std::string val;
+                if (m.enabled && m.loaded_now) val = "[On] (loaded)";
+                else if (m.enabled && !m.loaded_now) val = "[On] (restart to load)";
+                else if (!m.enabled && m.loaded_now) val = "[Off] (restart to unload)";
+                else val = "[Off]";
+                v.rows.push_back({label, val, false, false});
+            }
+        }
+        v.rows.push_back(all[kClose]);
+    } else {
+        for (int id : tab_rows(tab_now)) v.rows.push_back(all[id]);
+        v.rows.push_back(all[kClose]);
+    }
     if (tab_now == kTabGraphics) {
         snprintf(b, sizeof b, "Rendering at %gx now; resolution changes apply after a restart.", g_render_scale);
         v.note = b;
     } else if (tab_now == kTabControls) {
         v.note = "Controls changes apply at once and are saved to settings.ini.";
+    } else if (tab_now == kTabMods) {
+        v.note = mods::pending_restart()
+                     ? "Saved to mods.ini. Restart game to apply mod changes."
+                     : "Toggle mods [On] / [Off] in mods.ini. Restart game to apply mod changes.";
     } else if (tab_now == kTabAbout) {
         v.text = {
             "BotW-Native",
