@@ -88,11 +88,12 @@ anything. `generated/` is not in this repository.
 ```bash
 python tools/recompile.py /path/to/game/code/U-King.rpx generated
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build -j6
+cmake --build build -j12
 ```
 
-Use **`-j6`** on a 16 GB machine. Compiling `generated/` is the step that uses RAM. A higher
-job count can run the machine out of memory. The same `CMakeLists.txt` is what
+Each compile job on `generated/` peaks at about 0.5 GB of RAM. A 16 GB machine can run
+`-j12`. Allow roughly (RAM in GB − 2) / 0.75 jobs, and no more jobs than you have CPU threads.
+If `ccache` is on PATH, rebuilds use it automatically. The same `CMakeLists.txt` is what
 `.github/workflows/windows.yml` configures. Vulkan is the only graphics backend on Windows.
 
 ## Run

@@ -74,7 +74,9 @@ int auto_jobs(int* cores_out, double* ram_gb_out) {
     MEMORYSTATUSEX ms{sizeof ms};
     GlobalMemoryStatusEx(&ms);
     double gb = ms.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
-    int by_ram = std::max(1, (int)(gb / 2.6));
+    // Measured: one compiler process on the generated game code peaks around 0.5 GB, so allow
+    // 0.75 GB per job and keep 2 GB for the rest of the system.
+    int by_ram = std::max(1, (int)((gb - 2.0) / 0.75));
     if (cores_out) *cores_out = cores;
     if (ram_gb_out) *ram_gb_out = gb;
     return std::clamp(std::min(cores, by_ram), 1, 64);

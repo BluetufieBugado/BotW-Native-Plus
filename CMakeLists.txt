@@ -11,6 +11,27 @@ project(BotWRecomp
   DESCRIPTION "Breath of the Wild recompiled for Windows and Linux (Vulkan)"
   LANGUAGES C CXX)
 
+# Build speed helpers, both optional. ccache only helps rebuilds (a first build is always a
+# cache miss), so it is used when it is installed and otherwise ignored.
+option(BOTW_USE_CCACHE "Use ccache when it is installed" ON)
+if(BOTW_USE_CCACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+  find_program(BOTW_CCACHE_PROGRAM ccache)
+  if(BOTW_CCACHE_PROGRAM)
+    set(CMAKE_C_COMPILER_LAUNCHER ${BOTW_CCACHE_PROGRAM})
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${BOTW_CCACHE_PROGRAM})
+    message(STATUS "Using ccache: ${BOTW_CCACHE_PROGRAM}")
+  endif()
+endif()
+# Link with lld when asked and the compiler accepts it; falls back to the default linker.
+option(BOTW_USE_LLD "Link with lld if the compiler supports -fuse-ld=lld" OFF)
+if(BOTW_USE_LLD AND NOT MSVC)
+  include(CheckLinkerFlag)
+  check_linker_flag(CXX "-fuse-ld=lld" BOTW_HAVE_LLD)
+  if(BOTW_HAVE_LLD)
+    add_link_options(-fuse-ld=lld)
+  endif()
+endif()
+
 if(APPLE)
   enable_language(OBJC)
   enable_language(OBJCXX)
@@ -117,13 +138,15 @@ if(NOT GUEST_SOURCES)
   set(GUEST_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/guest_stub.cpp)
   message(STATUS "generated/ is empty: linking a guest stub (graphics init only; the game will not run)")
 endif()
+# Optimisation level for the recompiled game code (the bulk of the build time).
+set(BOTW_GUEST_OPT "-O2" CACHE STRING "Compiler optimisation flag for generated/ game code")
 add_library(guest OBJECT ${GUEST_SOURCES})
 target_include_directories(guest PRIVATE runtime/include generated)
 if(APPLE)
   target_compile_options(guest PRIVATE -O2 -gline-tables-only -w -fwrapv -fno-strict-aliasing -mcpu=apple-m1
     -ffp-contract=off)
 else()
-  target_compile_options(guest PRIVATE -O2 -g1 -w -fwrapv -fno-strict-aliasing -ffp-contract=off)
+  target_compile_options(guest PRIVATE ${BOTW_GUEST_OPT} -g1 -w -fwrapv -fno-strict-aliasing -ffp-contract=off)
 endif()
 file(GLOB BIG_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/generated/big_*.cpp)
 file(GLOB HUGE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/generated/huge_*.cpp)
