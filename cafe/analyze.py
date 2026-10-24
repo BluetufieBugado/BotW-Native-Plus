@@ -201,11 +201,18 @@ class Analyzer:
                 a = nxt
         return fn
 
-    def run(self) -> None:
+    def run(self, progress: bool = False) -> None:
         self.discover_entries()
         self.n_discovered = len(self.entries)
-        for e in sorted(self.entries):
+        if progress:
+            print(f"[recomp 2/4] Analyzing {self.n_discovered} PowerPC functions...", flush=True)
+        sorted_entries = sorted(self.entries)
+        step = max(1, self.n_discovered // 10)
+        for idx, e in enumerate(sorted_entries, 1):
             self.functions[e] = self.walk(e)
+            if progress and (idx % step == 0 or idx == self.n_discovered):
+                pct = (idx * 100) // max(1, self.n_discovered)
+                print(f"[recomp 2/4] Analyzing {self.n_discovered} PowerPC functions ({idx}/{self.n_discovered}, {pct}%)...", flush=True)
         # Gap filling: code no function reaches becomes a function of its own. Nothing existing
         # flows into a gap (else it would be covered), so earlier functions stay valid.
         covered = set()
@@ -223,3 +230,5 @@ class Analyzer:
                     covered.update(f.insns)
                     self.gap_functions += 1
             a += 4
+        if progress:
+            print(f"[recomp 2/4] Analyzed {len(self.functions)} PowerPC functions ({self.n_discovered} discovered, {self.gap_functions} gap)", flush=True)

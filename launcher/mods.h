@@ -1,19 +1,30 @@
-// Mods in <user data>\mods\<folder>\ and their on/off state and order in <user data>\mods.ini.
+// Mods in <user data>\mods\<folder>\ and their on/off state, order, and presets in <user data>\mods.ini.
 //
 // mods.ini:
 //   [Enabled]
 //   <folder> = 1        ; 1 on, 0 off, missing means off
 //   [Order]
 //   order = a,b,c       ; later wins. Without it the game sorts folders by name.
+//   [Presets]
+//   <folder> = <preset>
+//   <folder>:<category> = <preset>
 //
 // Plain C++, no Win32.
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
 
 namespace mods {
+
+struct PresetCategory {
+    std::string category;               // empty for single-category graphic packs
+    std::vector<std::string> options;   // preset names in declaration order
+    std::string default_option;         // option marked default = 1, or options.front()
+    std::string active;                 // currently selected option
+};
 
 struct Mod {
     std::string folder;       // folder name under mods\, also the mods.ini key
@@ -24,6 +35,16 @@ struct Mod {
     bool has_content = false;
     bool has_aoc = false;
     bool enabled = false;
+
+    uint32_t content_files = 0;
+    uint32_t aoc_files = 0;
+    uint32_t patch_files = 0;
+    uint32_t shader_files = 0;
+    uint32_t texture_rules = 0;
+    uint32_t overridden_files = 0;
+    std::vector<std::string> overrides_mods;
+    std::vector<std::string> overridden_by_mods;
+    std::vector<PresetCategory> presets;
 };
 
 struct State {
@@ -36,11 +57,18 @@ std::filesystem::path ini_path(const std::filesystem::path& user_root);
 
 State load(const std::filesystem::path& user_root);
 
-// Rewrites [Enabled], and [Order] when write_order is set (or it was there before).
+// Rewrites [Enabled], [Presets], and [Order] when write_order is set (or it was there before).
 // Other sections and keys for folders that are gone are kept.
 bool save(const std::filesystem::path& user_root, const State& state, bool write_order, std::string& err);
 
 int enabled_count(const State& state);
+
+// Installs a mod folder or .zip archive into <user_root>/mods/<ModName>, enables it in mods.ini,
+// and returns the installed folder name in installed_folder_out.
+bool install_mod(const std::filesystem::path& user_root,
+                 const std::filesystem::path& src_path,
+                 std::string& installed_folder_out,
+                 std::string& err);
 
 // Exposed for tests.
 void parse_rules(const std::string& text, Mod& out);

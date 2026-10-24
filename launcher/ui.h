@@ -57,6 +57,7 @@ int line_height(HFONT f);
 enum class Kind { Normal, Primary, Flat, Check };
 HWND button(HWND parent, int id, const wchar_t* text, Kind kind, bool on_panel = false, bool big = false);
 bool is_check(HWND b);
+void set_button_kind(HWND b, Kind kind);
 void set_checked(HWND b, bool on);
 bool checked(HWND b);
 bool is_button(HWND b);

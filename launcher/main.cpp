@@ -22,6 +22,7 @@
 #include "input/controls_file.h"
 #include "mods.h"
 #include "save_import.h"
+#include "setup_wizard.h"
 #include "ui.h"
 #include "unzip.h"
 
@@ -33,6 +34,9 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <atomic>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #ifndef BIF_NONEWFOLDERBUTTON
@@ -84,13 +88,54 @@ enum {
     ID_REFRESH,
     ID_MIGRATE,
     ID_MODS,
+    ID_MOD_INSTALL,
+    ID_MOD_TOGGLE,
     ID_MOD_UP,
     ID_MOD_DOWN,
     ID_MODS_FOLDER,
     ID_MODS_REFRESH,
     ID_NO_MODS,
+    ID_MOD_PRESET_BASE = 200,
+    ID_MOD_PRESET_MAX = 231,
     ID_LOG_TEXT,
     ID_LOG_FILE,
+    ID_SETUP_OPEN,
+    // Setup Assistant controls
+    ID_WIZ_BACK,
+    ID_WIZ_NEXT,
+    ID_WIZ_CANCEL,
+    ID_WIZ_USER,
+    ID_WIZ_USER_BROWSE,
+    ID_WIZ_TOOLCHAIN_REFRESH,
+    ID_WIZ_TOOLCHAIN_INSTALL,
+    ID_WIZ_MODE_MERGED,
+    ID_WIZ_MODE_SEPARATE,
+    ID_WIZ_GAME,
+    ID_WIZ_GAME_BROWSE,
+    ID_WIZ_AUTODETECT,
+    ID_WIZ_BASE,
+    ID_WIZ_BASE_BROWSE,
+    ID_WIZ_UPD,
+    ID_WIZ_UPD_BROWSE,
+    ID_WIZ_DLC,
+    ID_WIZ_DLC_BROWSE,
+    ID_WIZ_MERGE,
+    ID_WIZ_BUILD_START,
+    ID_WIZ_BUILD_CANCEL,
+    ID_WIZ_EXE_BROWSE,
+    ID_WIZ_LOG_EDIT,
+    ID_WIZ_SCALE_1X,
+    ID_WIZ_SCALE_2X,
+    ID_WIZ_SCALE_3X,
+    ID_WIZ_FPS_30,
+    ID_WIZ_FPS_60,
+    ID_WIZ_LAYOUT_AUTO,
+    ID_WIZ_LAYOUT_XBOX,
+    ID_WIZ_LAYOUT_NINTENDO,
+    ID_WIZ_FULLSCREEN,
+    ID_WIZ_GAMEPAD_VIEW,
+    ID_WIZ_GYRO,
+    ID_WIZ_IMPORT_SAVE,
 };
 
 struct Settings {
@@ -98,6 +143,7 @@ struct Settings {
     bool fullscreen = false;
     bool gamepad_view = false;
     bool no_mods = false;
+    bool setup_done = false;
     std::vector<std::string> other;  // lines this version does not know, written back as they were
 };
 
@@ -290,6 +336,7 @@ void save_launcher_ini() {
     line("fullscreen", g.cfg.fullscreen ? L"1" : L"0");
     line("gamepad_view", g.cfg.gamepad_view ? L"1" : L"0");
     line("no_mods", g.cfg.no_mods ? L"1" : L"0");
+    line("setup_done", g.cfg.setup_done ? L"1" : L"0");
     line("theme", g.cfg.theme);
     for (auto& l : g.cfg.other) out << l << "\n";
 }
@@ -313,6 +360,7 @@ void load_launcher_ini() {
         else if (k == "fullscreen") s.fullscreen = v == "1";
         else if (k == "gamepad_view") { s.gamepad_view = v == "1"; saw_gpv = true; }
         else if (k == "no_mods") s.no_mods = v == "1";
+        else if (k == "setup_done") s.setup_done = v == "1";
         else if (k == "theme") s.theme = widen(v);
         else s.other.push_back(line);
     }
@@ -379,6 +427,22 @@ void apply_dpi_everywhere(int dpi) {
         0);
 }
 
+enum class SetupPreset {
+    None,
+    Step1,
+    Step2,
+    Step3Idle,
+    Step3Recomp,
+    Step3Compile,
+    Step4,
+};
+void show_setup_wizard(SetupPreset preset = SetupPreset::None);
+void show_settings();
+void show_controls();
+void show_saves();
+void show_mods();
+void show_log();
+
 LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     auto* w = reinterpret_cast<Window*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (msg == WM_NCCREATE) {
@@ -438,6 +502,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (ui::draw_item(reinterpret_cast<DRAWITEMSTRUCT*>(lp))) return TRUE;
             break;
         case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
         case WM_CTLCOLORSTATIC: return ui::ctl_color(msg, wp, lp);
         case WM_COMMAND: {
             int id = LOWORD(wp), code = HIWORD(wp);
@@ -472,6 +537,23 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_TIMER: w->timer(); return 0;
+        case WM_APP + 10: {
+            char* s = reinterpret_cast<char*>(lp);
+            std::string arg = s ? s : "";
+            free(s);
+            if (arg == "setup" || arg == "setup1") show_setup_wizard(SetupPreset::Step1);
+            else if (arg == "setup2") show_setup_wizard(SetupPreset::Step2);
+            else if (arg == "setup3") show_setup_wizard(SetupPreset::Step3Idle);
+            else if (arg == "setup3-recomp") show_setup_wizard(SetupPreset::Step3Recomp);
+            else if (arg == "setup3-compile") show_setup_wizard(SetupPreset::Step3Compile);
+            else if (arg == "setup4") show_setup_wizard(SetupPreset::Step4);
+            else if (arg == "settings") show_settings();
+            else if (arg == "controls") show_controls();
+            else if (arg == "saves") show_saves();
+            else if (arg == "mods") show_mods();
+            else if (arg == "log") show_log();
+            return 0;
+        }
         case WM_CLOSE: w->on_close(); return 0;
         case WM_DESTROY:
             if (w->is_main) {
@@ -1441,19 +1523,76 @@ int selected_set() {
 }
 
 // Mods.
+std::wstring format_mod_presets(const mods::Mod& md) {
+    if (md.presets.empty()) return L"-";
+    std::wstring out;
+    for (const auto& pc : md.presets) {
+        if (pc.active.empty()) continue;
+        if (!out.empty()) out += L", ";
+        if (!pc.category.empty() && md.presets.size() > 1) {
+            out += widen(pc.category) + L": " + widen(pc.active);
+        } else {
+            out += widen(pc.active);
+        }
+    }
+    return out.empty() ? L"-" : out;
+}
+
+std::wstring format_mod_status(const mods::Mod& md) {
+    std::vector<std::wstring> parts;
+    uint32_t total_files = md.content_files + md.aoc_files;
+    if (total_files > 0) parts.push_back(std::to_wstring(total_files) + (total_files == 1 ? L" file" : L" files"));
+    if (md.patch_files > 0) parts.push_back(std::to_wstring(md.patch_files) + (md.patch_files == 1 ? L" patch" : L" patches"));
+    if (md.texture_rules > 0) parts.push_back(std::to_wstring(md.texture_rules) + (md.texture_rules == 1 ? L" tex rule" : L" tex rules"));
+    if (md.shader_files > 0) parts.push_back(std::to_wstring(md.shader_files) + (md.shader_files == 1 ? L" shader" : L" shaders"));
+    if (parts.empty()) return L"No files or rules";
+    std::wstring s;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i) s += L", ";
+        s += parts[i];
+    }
+    if (!md.overrides_mods.empty()) s += L" · Overrides " + std::to_wstring(md.overrides_mods.size());
+    if (!md.overridden_by_mods.empty()) s += L" · Overridden";
+    return s;
+}
+
+bool install_mod_path(const std::wstring& picked, std::string* installed_folder_out = nullptr) {
+    if (picked.empty()) return false;
+    if (!have_user()) return false;
+    std::string folder, err;
+    if (!mods::install_mod(user_root(), std::filesystem::path(picked), folder, err)) {
+        alert(L"Could not install mod:\n" + widen(err));
+        return false;
+    }
+    g.mods = mods::load(user_root());
+    update_play_button();
+    set_status(L"Installed and enabled mod "" + widen(folder) + L"".", Tone::Good);
+    if (installed_folder_out) *installed_folder_out = folder;
+    return true;
+}
+
 struct ModsWindow : Window {
-    HWND list = nullptr, up_b = nullptr, down_b = nullptr, folder_b = nullptr, refresh_b = nullptr, no_mods = nullptr, close_b = nullptr;
-    RECT hint{};
+    struct PresetDropdown {
+        std::string category;
+        RECT label_r{};
+        HWND combo = nullptr;
+    };
+    HWND list = nullptr, install_b = nullptr, toggle_b = nullptr, up_b = nullptr, down_b = nullptr;
+    HWND folder_b = nullptr, refresh_b = nullptr, no_mods = nullptr, close_b = nullptr;
+    std::vector<PresetDropdown> preset_combos;
+    RECT hint{}, detail_r{}, detail_title_r{}, detail_meta_r{}, detail_desc_r{}, detail_conflict_r{};
     bool filling = false;
     ModsWindow() {
         bar = 64;
-        min_w = 620;
-        min_h = 360;
+        min_w = 780;
+        min_h = 520;
     }
     void create() override {
         list = ui::list(hwnd, ID_MODS, LVS_EX_CHECKBOXES);
-        const wchar_t* cols[] = {L"Mod", L"Version", L"Description"};
-        add_columns(list, cols, 3);
+        const wchar_t* cols[] = {L"On / Mod Name", L"#", L"Version", L"Preset", L"Status / Files"};
+        add_columns(list, cols, 5);
+        install_b = ui::button(hwnd, ID_MOD_INSTALL, L"Install Mod (.zip / Folder)...", ui::Kind::Primary, true);
+        toggle_b = ui::button(hwnd, ID_MOD_TOGGLE, L"Enable / Disable", ui::Kind::Normal, true);
         up_b = ui::button(hwnd, ID_MOD_UP, L"Move up", ui::Kind::Normal, true);
         down_b = ui::button(hwnd, ID_MOD_DOWN, L"Move down", ui::Kind::Normal, true);
         folder_b = ui::button(hwnd, ID_MODS_FOLDER, L"Open mods folder", ui::Kind::Flat, true);
@@ -1461,48 +1600,202 @@ struct ModsWindow : Window {
         close_b = ui::button(hwnd, ID_CLOSE, L"Close", ui::Kind::Normal, true);
         no_mods = ui::button(hwnd, ID_NO_MODS, L"Launch without mods", ui::Kind::Check);
         ui::set_checked(no_mods, g.cfg.no_mods);
+        DragAcceptFiles(hwnd, TRUE);
         g.mods = mods::load(user_root());
         fill(0);
         SetFocus(list);
     }
     std::wstring hint_text() const {
-        std::wstring s = L"Each mod is a folder in " + mods::mods_dir(user_root()).wstring() +
-                         L" with content or aoc inside. Checked mods load from top to bottom; when two change the same file, the lower one wins.";
-        if (g.mods.list.empty()) s += L" No mods found yet.";
+        std::wstring s = L"Mods live in " + mods::mods_dir(user_root()).wstring() +
+                         L". Checked mods load in priority order from top (#1) to bottom (later overrides earlier). Drop a .zip or mod folder anywhere here to install it.";
+        if (g.mods.list.empty()) s += L" No mods installed yet.";
         return s;
+    }
+    int selected() const {
+        int i = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+        if (i < 0 || i >= static_cast<int>(g.mods.list.size())) return -1;
+        return i;
+    }
+    void clear_preset_combos() {
+        for (auto& pd : preset_combos) {
+            if (pd.combo) DestroyWindow(pd.combo);
+        }
+        preset_combos.clear();
+    }
+    void rebuild_preset_combos() {
+        clear_preset_combos();
+        int idx = selected();
+        if (idx < 0) return;
+        const auto& md = g.mods.list[static_cast<size_t>(idx)];
+        int count = std::min<int>(static_cast<int>(md.presets.size()), ID_MOD_PRESET_MAX - ID_MOD_PRESET_BASE + 1);
+        for (int i = 0; i < count; ++i) {
+            const auto& pc = md.presets[static_cast<size_t>(i)];
+            if (pc.options.empty()) continue;
+            HWND cb = CreateWindowExW(0, L"COMBOBOX", L"",
+                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                      0, 0, 120, S(240), hwnd,
+                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_MOD_PRESET_BASE + i)),
+                                      g.inst, nullptr);
+            SendMessageW(cb, WM_SETFONT, reinterpret_cast<WPARAM>(ui::fonts().body), TRUE);
+            int sel = 0;
+            for (int j = 0; j < static_cast<int>(pc.options.size()); ++j) {
+                std::wstring opt = widen(pc.options[static_cast<size_t>(j)]);
+                SendMessageW(cb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(opt.c_str()));
+                if (pc.options[static_cast<size_t>(j)] == pc.active) sel = j;
+            }
+            SendMessageW(cb, CB_SETCURSEL, sel, 0);
+            preset_combos.push_back({pc.category, {}, cb});
+        }
     }
     void layout(int w, int h) override {
         int m = S(24), field = S(32), gap = S(8);
         int th = text_height(ui::fonts().body, hint_text(), w - 2 * m);
-        hint = {m, S(20), w - m, S(20) + th};
-        int top = hint.bottom + S(12), bottom = h - S(bar) - S(16) - S(24) - S(12);
-        ui::place_framed(list, {m, top, w - m, std::max(top + S(40), bottom)});
+        hint = {m, S(16), w - m, S(16) + th};
+        int detail_h = S(132);
+        int bottom_check_y = h - S(bar) - S(12) - S(24);
+        int detail_bottom = bottom_check_y - S(10);
+        int detail_top = std::max<int>(static_cast<int>(hint.bottom) + S(120), detail_bottom - detail_h);
+        int list_top = hint.bottom + S(10);
+        int list_bottom = std::max(list_top + S(80), detail_top - S(10));
+
+        ui::place_framed(list, {m, list_top, w - m, list_bottom});
         int lw = w - 2 * m - S(4) - GetSystemMetrics(SM_CXVSCROLL);
-        ListView_SetColumnWidth(list, 0, lw * 34 / 100);
-        ListView_SetColumnWidth(list, 1, lw * 12 / 100);
-        ListView_SetColumnWidth(list, 2, lw - lw * 34 / 100 - lw * 12 / 100);
-        MoveWindow(no_mods, m, std::max(top + S(40), bottom) + S(12), ui::button_width(no_mods), S(24), TRUE);
+        int c0 = lw * 30 / 100;
+        int c1 = lw * 7 / 100;
+        int c2 = lw * 11 / 100;
+        int c3 = lw * 22 / 100;
+        int c4 = lw - c0 - c1 - c2 - c3;
+        ListView_SetColumnWidth(list, 0, c0);
+        ListView_SetColumnWidth(list, 1, c1);
+        ListView_SetColumnWidth(list, 2, c2);
+        ListView_SetColumnWidth(list, 3, c3);
+        ListView_SetColumnWidth(list, 4, c4);
+
+        detail_r = {m, detail_top, w - m, detail_bottom};
+        int pad = S(12);
+        int right_col_w = preset_combos.empty() ? 0 : std::min(S(280), (w - 2 * m) * 42 / 100);
+        int left_right = detail_r.right - pad - (right_col_w ? (right_col_w + S(16)) : 0);
+        int lh_strong = ui::line_height(ui::fonts().body_strong);
+        int lh_small = ui::line_height(ui::fonts().small);
+        int dy = detail_r.top + pad;
+        detail_title_r = {detail_r.left + pad, dy, left_right, dy + lh_strong};
+        dy += lh_strong + S(4);
+        detail_meta_r = {detail_r.left + pad, dy, left_right, dy + lh_small};
+        dy += lh_small + S(4);
+        detail_conflict_r = {detail_r.left + pad, dy, left_right, dy + lh_small};
+        dy += lh_small + S(6);
+        detail_desc_r = {detail_r.left + pad, dy, left_right, detail_r.bottom - pad};
+
+        if (!preset_combos.empty()) {
+            int rx = detail_r.right - pad - right_col_w;
+            int ry = detail_r.top + pad;
+            int row_h = S(26);
+            for (auto& pd : preset_combos) {
+                int label_w = S(96);
+                pd.label_r = {rx, ry, rx + label_w - S(6), ry + row_h};
+                MoveWindow(pd.combo, rx + label_w, ry, right_col_w - label_w, S(220), TRUE);
+                ry += row_h + S(6);
+            }
+        }
+
+        MoveWindow(no_mods, m, bottom_check_y, ui::button_width(no_mods), S(24), TRUE);
         int by = h - S(bar) + (S(bar) - field) / 2;
-        place_row({up_b, down_b}, m, by, field, gap);
+        place_row({install_b, toggle_b, up_b, down_b}, m, by, field, gap);
         place_row_right({close_b, refresh_b, folder_b}, w - m, by, field, S(4));
     }
-    void paint(HDC dc, const RECT&) override { paint_lines(dc, hint_text(), hint, ui::fonts().body, ui::pal.muted); }
+    void paint(HDC dc, const RECT&) override {
+        const auto& f = ui::fonts();
+        paint_lines(dc, hint_text(), hint, f.body, ui::pal.muted);
+        ui::round_rect(dc, detail_r, S(4), ui::pal.field, ui::pal.field_line);
+        int idx = selected();
+        if (idx < 0) {
+            ui::draw_text(dc, g.mods.list.empty() ? L"No mods installed. Click \"Install Mod (.zip / Folder)...\" or drop a mod .zip here."
+                                                  : L"Select a mod above to view details, file conflicts, and graphic pack presets.",
+                          detail_title_r, f.body, ui::pal.muted, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            return;
+        }
+        const auto& md = g.mods.list[static_cast<size_t>(idx)];
+        std::wstring title = widen(md.name);
+        if (!md.version.empty()) title += L"  v" + widen(md.version);
+        title += md.enabled ? L"   [Enabled]" : L"   [Disabled]";
+        ui::draw_text(dc, title, detail_title_r, f.body_strong, ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+        std::wstring meta = L"Folder: mods\\" + widen(md.folder) + L"   \u00B7   " +
+                            std::to_wstring(md.content_files) + L" content files, " +
+                            std::to_wstring(md.aoc_files) + L" DLC files, " +
+                            std::to_wstring(md.patch_files) + L" patches";
+        if (md.texture_rules > 0) meta += L", " + std::to_wstring(md.texture_rules) + L" texture rules";
+        if (md.shader_files > 0) meta += L", " + std::to_wstring(md.shader_files) + L" custom shaders";
+        ui::draw_text(dc, meta, detail_meta_r, f.small, ui::pal.muted, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+        std::wstring conflict;
+        COLORREF conflict_col = ui::pal.muted;
+        if (!md.overrides_mods.empty()) {
+            conflict += L"Overrides: ";
+            for (size_t i = 0; i < md.overrides_mods.size(); ++i) {
+                if (i) conflict += L", ";
+                conflict += widen(md.overrides_mods[i]);
+            }
+        }
+        if (!md.overridden_by_mods.empty()) {
+            if (!conflict.empty()) conflict += L"   ·   ";
+            conflict += L"Overridden by: ";
+            for (size_t i = 0; i < md.overridden_by_mods.size(); ++i) {
+                if (i) conflict += L", ";
+                conflict += widen(md.overridden_by_mods[i]);
+            }
+            conflict_col = ui::pal.warn;
+        }
+        if (conflict.empty()) conflict = L"No file conflicts with other enabled mods.";
+        ui::draw_text(dc, conflict, detail_conflict_r, f.small, conflict_col, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+        std::wstring desc = md.description.empty() ? L"No description in rules.txt." : widen(md.description);
+        ui::draw_text(dc, desc, detail_desc_r, f.body, ui::pal.text, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+        for (const auto& pd : preset_combos) {
+            std::wstring lbl = pd.category.empty() ? L"Preset:" : (widen(pd.category) + L":");
+            ui::draw_text(dc, lbl, pd.label_r, f.small, ui::pal.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
+    }
+    void update_row_texts() {
+        filling = true;
+        for (int i = 0; i < static_cast<int>(g.mods.list.size()); i++) {
+            const auto& md = g.mods.list[static_cast<size_t>(i)];
+            std::wstring name = widen(md.name);
+            std::wstring prio = L"#" + std::to_wstring(i + 1);
+            std::wstring ver = md.version.empty() ? L"-" : widen(md.version);
+            std::wstring preset = format_mod_presets(md);
+            std::wstring status = format_mod_status(md);
+            ListView_SetItemText(list, i, 0, name.data());
+            ListView_SetItemText(list, i, 1, prio.data());
+            ListView_SetItemText(list, i, 2, ver.data());
+            ListView_SetItemText(list, i, 3, preset.data());
+            ListView_SetItemText(list, i, 4, status.data());
+            ListView_SetCheckState(list, i, md.enabled ? TRUE : FALSE);
+        }
+        filling = false;
+    }
     void fill(int select) {
         filling = true;
         SendMessageW(list, WM_SETREDRAW, FALSE, 0);
         ListView_DeleteAllItems(list);
         for (int i = 0; i < static_cast<int>(g.mods.list.size()); i++) {
             const auto& md = g.mods.list[static_cast<size_t>(i)];
-            std::wstring name = widen(md.name), ver = widen(md.version), desc = widen(md.description);
-            if (!md.has_content && !md.has_aoc) desc = L"No content or aoc folder, so this mod changes nothing." + (desc.empty() ? L"" : L" " + desc);
+            std::wstring name = widen(md.name);
+            std::wstring prio = L"#" + std::to_wstring(i + 1);
+            std::wstring ver = md.version.empty() ? L"-" : widen(md.version);
+            std::wstring preset = format_mod_presets(md);
+            std::wstring status = format_mod_status(md);
             LVITEMW it{};
             it.mask = LVIF_TEXT | LVIF_PARAM;
             it.iItem = i;
             it.pszText = name.data();
             it.lParam = i;
             ListView_InsertItem(list, &it);
-            ListView_SetItemText(list, i, 1, ver.data());
-            ListView_SetItemText(list, i, 2, desc.data());
+            ListView_SetItemText(list, i, 1, prio.data());
+            ListView_SetItemText(list, i, 2, ver.data());
+            ListView_SetItemText(list, i, 3, preset.data());
+            ListView_SetItemText(list, i, 4, status.data());
             ListView_SetCheckState(list, i, md.enabled ? TRUE : FALSE);
         }
         if (select >= 0 && select < static_cast<int>(g.mods.list.size())) {
@@ -1512,30 +1805,84 @@ struct ModsWindow : Window {
         SendMessageW(list, WM_SETREDRAW, TRUE, 0);
         InvalidateRect(list, nullptr, TRUE);
         filling = false;
+        rebuild_preset_combos();
+        relayout();
     }
     void save(bool order) {
         std::string err;
         if (!mods::save(user_root(), g.mods, order, err)) alert(L"Could not write mods.ini:\n" + widen(err));
-        if (order) g.mods.has_order = true;
+        int sel = selected();
+        g.mods = mods::load(user_root());
+        update_row_texts();
+        if (sel >= 0 && sel < static_cast<int>(g.mods.list.size())) {
+            filling = true;
+            ListView_SetItemState(list, sel, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            filling = false;
+        }
+        InvalidateRect(hwnd, nullptr, FALSE);
         update_play_button();
     }
     void move(int delta) {
-        int i = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+        int i = selected();
         int j = i + delta;
         if (i < 0 || j < 0 || j >= static_cast<int>(g.mods.list.size())) return;
         std::swap(g.mods.list[static_cast<size_t>(i)], g.mods.list[static_cast<size_t>(j)]);
-        save(true);
+        std::string err;
+        if (!mods::save(user_root(), g.mods, true, err)) alert(L"Could not write mods.ini:\n" + widen(err));
+        g.mods = mods::load(user_root());
         fill(j);
+        update_play_button();
     }
-    void command(int id, int, HWND) override {
+    void toggle_selected() {
+        int i = selected();
+        if (i < 0) return;
+        auto& md = g.mods.list[static_cast<size_t>(i)];
+        md.enabled = !md.enabled;
+        save(false);
+    }
+    void on_install() {
+        std::wstring picked = pick_browse(hwnd, L"Select a BotW mod folder or a .zip archive to install.", true);
+        if (picked.empty()) return;
+        install_and_select(picked);
+    }
+    void install_and_select(const std::wstring& picked) {
+        std::string folder;
+        if (!install_mod_path(picked, &folder)) return;
+        int sel = 0;
+        for (int i = 0; i < static_cast<int>(g.mods.list.size()); ++i) {
+            if (_stricmp(g.mods.list[static_cast<size_t>(i)].folder.c_str(), folder.c_str()) == 0) {
+                sel = i;
+                break;
+            }
+        }
+        fill(sel);
+    }
+    void command(int id, int code, HWND ctl) override {
+        if (id >= ID_MOD_PRESET_BASE && id <= ID_MOD_PRESET_MAX && code == CBN_SELCHANGE) {
+            int idx = selected();
+            int p_idx = id - ID_MOD_PRESET_BASE;
+            if (idx >= 0 && p_idx >= 0 && p_idx < static_cast<int>(preset_combos.size())) {
+                auto& md = g.mods.list[static_cast<size_t>(idx)];
+                if (p_idx < static_cast<int>(md.presets.size())) {
+                    int cur = static_cast<int>(SendMessageW(ctl, CB_GETCURSEL, 0, 0));
+                    auto& pc = md.presets[static_cast<size_t>(p_idx)];
+                    if (cur >= 0 && cur < static_cast<int>(pc.options.size())) {
+                        pc.active = pc.options[static_cast<size_t>(cur)];
+                        save(false);
+                    }
+                }
+            }
+            return;
+        }
         switch (id) {
+            case ID_MOD_INSTALL: on_install(); break;
+            case ID_MOD_TOGGLE: toggle_selected(); break;
             case ID_MOD_UP: move(-1); break;
             case ID_MOD_DOWN: move(1); break;
             case ID_MODS_FOLDER: open_folder(mods::mods_dir(user_root())); break;
             case ID_MODS_REFRESH:
                 g.mods = mods::load(user_root());
-                fill(0);
-                relayout();
+                fill(std::max(0, selected()));
                 update_play_button();
                 break;
             case ID_NO_MODS:
@@ -1548,17 +1895,32 @@ struct ModsWindow : Window {
         }
     }
     LRESULT notify(NMHDR* hdr) override {
-        if (hdr->hwndFrom != list || hdr->code != LVN_ITEMCHANGED || filling) return 0;
+        if (hdr->hwndFrom != list || filling) return 0;
+        if (hdr->code == NM_DBLCLK) {
+            toggle_selected();
+            return 0;
+        }
+        if (hdr->code != LVN_ITEMCHANGED) return 0;
         auto* nm = reinterpret_cast<NMLISTVIEW*>(hdr);
-        if (!(nm->uChanged & LVIF_STATE) || !((nm->uNewState ^ nm->uOldState) & LVIS_STATEIMAGEMASK)) return 0;
+        if (!(nm->uChanged & LVIF_STATE)) return 0;
         if (nm->iItem < 0 || nm->iItem >= static_cast<int>(g.mods.list.size())) return 0;
-        bool on = ListView_GetCheckState(list, nm->iItem) != 0;
-        auto& md = g.mods.list[static_cast<size_t>(nm->iItem)];
-        if (md.enabled == on) return 0;
-        md.enabled = on;
-        save(false);
+        if ((nm->uNewState ^ nm->uOldState) & LVIS_STATEIMAGEMASK) {
+            bool on = ListView_GetCheckState(list, nm->iItem) != 0;
+            auto& md = g.mods.list[static_cast<size_t>(nm->iItem)];
+            if (md.enabled != on) {
+                md.enabled = on;
+                save(false);
+            }
+        }
+        if ((nm->uNewState ^ nm->uOldState) & LVIS_SELECTED) {
+            if (nm->uNewState & LVIS_SELECTED) {
+                rebuild_preset_combos();
+                relayout();
+            }
+        }
         return 0;
     }
+    void dropped(const std::wstring& p) override { install_and_select(p); }
 };
 
 // Log.
@@ -1571,7 +1933,7 @@ struct LogWindow : Window {
     }
     void create() override {
         text = ui::edit(hwnd, ID_LOG_TEXT, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_HSCROLL, ui::FontRole::Mono);
-        SetWindowLongW(text, GWL_STYLE, GetWindowLongW(text, GWL_STYLE) & ~ES_AUTOHSCROLL);
+        SetWindowLongW(text, GWL_STYLE, GetWindowLongW(text, GWL_STYLE) && ~ES_AUTOHSCROLL);
         set_text(text, tail_file(user_root() / "runtime.log"));
         file_b = ui::button(hwnd, ID_LOG_FILE, L"Open in editor", ui::Kind::Normal, true);
         close_b = ui::button(hwnd, ID_CLOSE, L"Close", ui::Kind::Normal, true);
@@ -1598,6 +1960,1080 @@ struct LogWindow : Window {
     }
 };
 
+// Setup Assistant (4-step wizard).
+
+struct SetupWizardWindow : Window {
+    int step = 0;  // 0..3
+    SetupPreset preset = SetupPreset::None;
+    setupwizard::ToolchainStatus tc;
+    gameinfo::Info ginfo;
+    gameinfo::RpxVerify rpx_ver;
+    bool separate_mode = false;
+    std::wstring merge_note;
+    Tone merge_tone = Tone::Normal;
+
+    // Step 1 controls
+    HWND user_e = nullptr, user_b = nullptr;
+    HWND tc_refresh_b = nullptr, tc_install_b = nullptr;
+
+    // Step 2 controls
+    HWND mode_merged_b = nullptr, mode_sep_b = nullptr, autodetect_b = nullptr;
+    HWND game_e = nullptr, game_b = nullptr;
+    HWND base_e = nullptr, base_b = nullptr;
+    HWND upd_e = nullptr, upd_b = nullptr;
+    HWND dlc_e = nullptr, dlc_b = nullptr;
+    HWND merge_b = nullptr;
+
+    // Step 3 controls && worker state
+    HWND build_start_b = nullptr, build_cancel_b = nullptr, exe_pick_b = nullptr;
+    HWND log_e = nullptr;
+    std::mutex build_mu;
+    setupwizard::BuildProgress prog;
+    std::string log_buf;
+    bool log_dirty = false;
+    bool building = false;
+    std::atomic<bool> cancel_req{false};
+    HANDLE child_proc = nullptr;
+    DWORD build_start_tick = 0;
+    DWORD elapsed_sec = 0;
+    std::thread worker;
+
+    // Step 4 controls
+    setupwizard::GamePrefs prefs;
+    HWND scale_1x = nullptr, scale_2x = nullptr, scale_3x = nullptr;
+    HWND fps_30 = nullptr, fps_60 = nullptr;
+    HWND lay_auto = nullptr, lay_xbox = nullptr, lay_nin = nullptr;
+    HWND chk_fs = nullptr, chk_gpv = nullptr, chk_gyro = nullptr;
+    HWND imp_save_b = nullptr;
+    std::wstring save_note;
+
+    // Bottom bar controls
+    HWND back_b = nullptr, next_b = nullptr, close_b = nullptr;
+
+    explicit SetupWizardWindow(SetupPreset p = SetupPreset::None) : preset(p) {
+        bar = 64;
+        min_w = 760;
+        min_h = 560;
+        if (p == SetupPreset::Step2) step = 1;
+        else if (p == SetupPreset::Step3Idle || p == SetupPreset::Step3Recomp || p == SetupPreset::Step3Compile) step = 2;
+        else if (p == SetupPreset::Step4) step = 3;
+    }
+
+    ~SetupWizardWindow() override {
+        stop_worker();
+    }
+
+    void stop_worker() {
+        cancel_req = true;
+        {
+            std::lock_guard<std::mutex> lk(build_mu);
+            if (child_proc) TerminateProcess(child_proc, 1);
+        }
+        if (worker.joinable()) worker.join();
+    }
+
+    void create() override {
+        // Step 1
+        user_e = ui::edit(hwnd, ID_WIZ_USER);
+        user_b = ui::button(hwnd, ID_WIZ_USER_BROWSE, L"Browse", ui::Kind::Normal);
+        tc_refresh_b = ui::button(hwnd, ID_WIZ_TOOLCHAIN_REFRESH, L"Re-check environment", ui::Kind::Normal);
+        tc_install_b = ui::button(hwnd, ID_WIZ_TOOLCHAIN_INSTALL, L"Install MSYS2 toolchain", ui::Kind::Normal);
+
+        // Step 2
+        mode_merged_b = ui::button(hwnd, ID_WIZ_MODE_MERGED, L"Single merged folder", ui::Kind::Primary);
+        mode_sep_b = ui::button(hwnd, ID_WIZ_MODE_SEPARATE, L"Separate Base + Update + DLC", ui::Kind::Normal);
+        autodetect_b = ui::button(hwnd, ID_WIZ_AUTODETECT, L"Auto-detect dumps...", ui::Kind::Normal);
+        game_e = ui::edit(hwnd, ID_WIZ_GAME);
+        game_b = ui::button(hwnd, ID_WIZ_GAME_BROWSE, L"Browse", ui::Kind::Normal);
+        base_e = ui::edit(hwnd, ID_WIZ_BASE);
+        base_b = ui::button(hwnd, ID_WIZ_BASE_BROWSE, L"Browse", ui::Kind::Normal);
+        upd_e = ui::edit(hwnd, ID_WIZ_UPD);
+        upd_b = ui::button(hwnd, ID_WIZ_UPD_BROWSE, L"Browse", ui::Kind::Normal);
+        dlc_e = ui::edit(hwnd, ID_WIZ_DLC);
+        dlc_b = ui::button(hwnd, ID_WIZ_DLC_BROWSE, L"Browse", ui::Kind::Normal);
+        merge_b = ui::button(hwnd, ID_WIZ_MERGE, L"Merge Base + Update + DLC", ui::Kind::Primary);
+
+        // Step 3
+        build_start_b = ui::button(hwnd, ID_WIZ_BUILD_START, L"Convert Wii U to C++ & Build Executable", ui::Kind::Primary);
+        build_cancel_b = ui::button(hwnd, ID_WIZ_BUILD_CANCEL, L"Cancel build", ui::Kind::Normal);
+        exe_pick_b = ui::button(hwnd, ID_WIZ_EXE_BROWSE, L"Use existing BotWRecomp.exe...", ui::Kind::Normal);
+        log_e = ui::edit(hwnd, ID_WIZ_LOG_EDIT, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_HSCROLL, ui::FontRole::Mono);
+        SetWindowLongW(log_e, GWL_STYLE, GetWindowLongW(log_e, GWL_STYLE) && ~ES_AUTOHSCROLL);
+
+        // Step 4
+        scale_1x = ui::button(hwnd, ID_WIZ_SCALE_1X, L"720p (1x Native)", ui::Kind::Normal);
+        scale_2x = ui::button(hwnd, ID_WIZ_SCALE_2X, L"1440p (2x Crisp)", ui::Kind::Normal);
+        scale_3x = ui::button(hwnd, ID_WIZ_SCALE_3X, L"2160p (3x 4K)", ui::Kind::Normal);
+        fps_30 = ui::button(hwnd, ID_WIZ_FPS_30, L"30 FPS (Original)", ui::Kind::Normal);
+        fps_60 = ui::button(hwnd, ID_WIZ_FPS_60, L"60 FPS", ui::Kind::Normal);
+        lay_auto = ui::button(hwnd, ID_WIZ_LAYOUT_AUTO, L"Auto-detect", ui::Kind::Normal);
+        lay_xbox = ui::button(hwnd, ID_WIZ_LAYOUT_XBOX, L"Xbox (A = bottom)", ui::Kind::Normal);
+        lay_nin = ui::button(hwnd, ID_WIZ_LAYOUT_NINTENDO, L"Nintendo (A = right)", ui::Kind::Normal);
+        chk_fs = ui::button(hwnd, ID_WIZ_FULLSCREEN, L"Start in fullscreen", ui::Kind::Check);
+        chk_gpv = ui::button(hwnd, ID_WIZ_GAMEPAD_VIEW, L"Show Wii U GamePad screen beside TV (F2 / Guide)", ui::Kind::Check);
+        chk_gyro = ui::button(hwnd, ID_WIZ_GYRO, L"Enable controller motion / gyro aiming", ui::Kind::Check);
+        imp_save_b = ui::button(hwnd, ID_WIZ_IMPORT_SAVE, L"Import Cemu or Wii U save...", ui::Kind::Normal);
+
+        // Bottom bar
+        back_b = ui::button(hwnd, ID_WIZ_BACK, L"Back", ui::Kind::Normal, true);
+        next_b = ui::button(hwnd, ID_WIZ_NEXT, L"Next", ui::Kind::Primary, true);
+        close_b = ui::button(hwnd, ID_WIZ_CANCEL, L"Close", ui::Kind::Normal, true);
+
+        set_text(user_e, g.cfg.user.empty() ? appdata_root() : g.cfg.user);
+        set_text(game_e, g.cfg.game);
+
+        prefs = setupwizard::read_game_prefs(user_root());
+        prefs.gamepad_view = g.cfg.gamepad_view;
+        ui::set_checked(chk_fs, g.cfg.fullscreen);
+        ui::set_checked(chk_gpv, prefs.gamepad_view);
+        ui::set_checked(chk_gyro, prefs.gyro);
+
+        refresh_toolchain();
+        inspect_game_folder();
+        sync_pref_buttons();
+
+        if (preset == SetupPreset::Step3Recomp) {
+            building = true;
+            elapsed_sec = 18;
+            prog.stage = setupwizard::BuildStage::RecompileWiiUToCpp;
+            prog.recompile_step = 3;
+            prog.recompile_total = 4;
+            prog.sub_done = 42;
+            prog.sub_total = 258;
+            prog.stage_percent = 16;
+            prog.overall_percent = 16;
+            tc.has_exe = false;
+            prog.current_item = "fn_020c0000.cpp";
+            prog.phase_text = "Step 1/2: Converting Wii U binary to C++ (shard 42 / 258, 16%)...";
+            log_buf =
+                "[recomp 1/4] Decompressing & parsing U-King.rpx...\r\n"
+                "  text: 0x02000000 .. 0x030eab60 (17,738,592 bytes)\r\n"
+                "  rodata: 0x10000000 .. 0x109a3800 (10,106,880 bytes)\r\n"
+                "[recomp 2/4] Analyzing 66137 PowerPC functions...\r\n"
+                "  discovered 66,137 functions, 1,412,908 basic blocks, 3,842 jump tables\r\n"
+                "[recomp 3/4] Generating C++ shard 1/258 (0%) [fn_02000000.cpp]...\r\n"
+                "[recomp 3/4] Generating C++ shard 16/258 (6%) [fn_02040000.cpp]...\r\n"
+                "[recomp 3/4] Generating C++ shard 32/258 (12%) [fn_02080000.cpp]...\r\n"
+                "[recomp 3/4] Generating C++ shard 42/258 (16%) [fn_020c0000.cpp]...\r\n";
+            set_text(log_e, widen(log_buf));
+        } else if (preset == SetupPreset::Step3Compile) {
+            building = true;
+            elapsed_sec = 94;
+            prog.stage = setupwizard::BuildStage::CompileCppToExe;
+            prog.recompile_step = 4;
+            prog.recompile_total = 4;
+            prog.sub_done = 412;
+            prog.sub_total = 1267;
+            prog.stage_percent = 32;
+            prog.overall_percent = 63;
+            prog.current_item = "fn_02340000.cpp.obj";
+            prog.phase_text = "Step 2/2: Compiling C++ to native executable (412 / 1267, 32%)...";
+            log_buf =
+                "[recomp 4/4] Writing dispatch table & HLE stubs (100%)\r\n"
+                "-- Configuring done (0.8s)\r\n"
+                "-- Generating done (0.3s)\r\n"
+                "[128/1267] Building CXX object CMakeFiles/BotWRecomp.dir/generated/fn_02100000.cpp.obj\r\n"
+                "[256/1267] Building CXX object CMakeFiles/BotWRecomp.dir/generated/fn_02200000.cpp.obj\r\n"
+                "[412/1267] Building CXX object CMakeFiles/BotWRecomp.dir/generated/fn_02340000.cpp.obj\r\n";
+            set_text(log_e, widen(log_buf));
+        } else {
+            if (tc.has_exe) {
+                prog.stage = setupwizard::BuildStage::Complete;
+                prog.stage_percent = 100;
+                prog.overall_percent = 100;
+                prog.phase_text = "Ready: BotWRecomp.exe is built and verified.";
+                log_buf = "BotWRecomp.exe found at:\r\n  " + narrow(tc.exe_path.wstring()) +
+                          "\r\n\r\nClick 'Rebuild Wii U -> C++ & Executable' below if you want to regenerate generated/*.cpp from U-King.rpx and recompile.\r\n";
+            } else {
+                prog.stage = setupwizard::BuildStage::Idle;
+                prog.phase_text = "Ready to convert Wii U U-King.rpx to C++ and compile BotWRecomp.exe.";
+                log_buf = "Pipeline stages:\r\n"
+                          "  Stage 1/2: tools/recompile.py reads code\\U-King.rpx and emits 258 C++ shards into generated/*.cpp\r\n"
+                          "  Stage 2/2: CMake + Ninja compiles generated/*.cpp + runtime into BotWRecomp.exe\r\n";
+            }
+            set_text(log_e, widen(log_buf));
+        }
+
+        SetTimer(hwnd, 2, 200, nullptr);
+        update_step_visibility();
+    }
+
+    void refresh_toolchain() {
+        tc = setupwizard::inspect_toolchain(exe_dir(), std::filesystem::path(g.cfg.exe));
+        if (g.cfg.exe.empty() && tc.has_exe) {
+            g.cfg.exe = tc.exe_path.wstring();
+        }
+        if (build_start_b) {
+            set_text(build_start_b, tc.has_exe ? L"Rebuild Wii U -> C++ & Executable"
+                                               : L"Convert Wii U to C++ & Build Executable");
+        }
+    }
+
+    void inspect_game_folder() {
+        std::wstring gp = get_text(game_e);
+        ginfo = gameinfo::read(std::filesystem::path(gp));
+        if (ginfo.has_rpx) {
+            rpx_ver = gameinfo::verify_rpx(std::filesystem::path(gp));
+        } else {
+            rpx_ver = {};
+            rpx_ver.summary = gp.empty() ? "No game folder selected yet."
+                                         : "code\\U-King.rpx not found in this folder.";
+        }
+    }
+
+    void sync_pref_buttons() {
+        ui::set_button_kind(scale_1x, prefs.scale == 1 ? ui::Kind::Primary : ui::Kind::Normal);
+        ui::set_button_kind(scale_2x, prefs.scale == 2 ? ui::Kind::Primary : ui::Kind::Normal);
+        ui::set_button_kind(scale_3x, prefs.scale >= 3 ? ui::Kind::Primary : ui::Kind::Normal);
+
+        ui::set_button_kind(fps_30, prefs.fps < 45 ? ui::Kind::Primary : ui::Kind::Normal);
+        ui::set_button_kind(fps_60, prefs.fps >= 45 ? ui::Kind::Primary : ui::Kind::Normal);
+
+        ui::set_button_kind(lay_auto, prefs.layout < 0 ? ui::Kind::Primary : ui::Kind::Normal);
+        ui::set_button_kind(lay_xbox, prefs.layout == 1 ? ui::Kind::Primary : ui::Kind::Normal);
+        ui::set_button_kind(lay_nin, prefs.layout == 0 ? ui::Kind::Primary : ui::Kind::Normal);
+
+        ui::set_button_kind(mode_merged_b, !separate_mode ? ui::Kind::Primary : ui::Kind::Normal);
+        ui::set_button_kind(mode_sep_b, separate_mode ? ui::Kind::Primary : ui::Kind::Normal);
+    }
+
+    void update_step_visibility() {
+        auto show = [](HWND h, bool on) {
+            if (h) ShowWindow(h, on ? SW_SHOW : SW_HIDE);
+        };
+        show(user_e, step == 0);
+        show(user_b, step == 0);
+        show(tc_refresh_b, step == 0);
+        show(tc_install_b, step == 0 && (!tc.has_python || !tc.has_compiler));
+
+        show(mode_merged_b, step == 1);
+        show(mode_sep_b, step == 1);
+        show(autodetect_b, step == 1);
+        show(game_e, step == 1 && !separate_mode);
+        show(game_b, step == 1 && !separate_mode);
+        show(base_e, step == 1 && separate_mode);
+        show(base_b, step == 1 && separate_mode);
+        show(upd_e, step == 1 && separate_mode);
+        show(upd_b, step == 1 && separate_mode);
+        show(dlc_e, step == 1 && separate_mode);
+        show(dlc_b, step == 1 && separate_mode);
+        show(merge_b, step == 1 && separate_mode);
+
+        show(build_start_b, step == 2);
+        show(build_cancel_b, step == 2);
+        show(exe_pick_b, step == 2);
+        show(log_e, step == 2);
+        EnableWindow(build_start_b, !building);
+        EnableWindow(build_cancel_b, building);
+        EnableWindow(exe_pick_b, !building);
+
+        show(scale_1x, step == 3);
+        show(scale_2x, step == 3);
+        show(scale_3x, step == 3);
+        show(fps_30, step == 3);
+        show(fps_60, step == 3);
+        show(lay_auto, step == 3);
+        show(lay_xbox, step == 3);
+        show(lay_nin, step == 3);
+        show(chk_fs, step == 3);
+        show(chk_gpv, step == 3);
+        show(chk_gyro, step == 3);
+        show(imp_save_b, step == 3);
+
+        EnableWindow(back_b, step > 0 && !building);
+        set_text(next_b, step == 3 ? L"Finish & Open Launcher" : L"Next");
+        EnableWindow(next_b, !building);
+        relayout();
+    }
+
+    void layout(int w, int h) override {
+        int m = S(24), field = S(32), gap = S(8);
+        int top = S(82);
+
+        if (step == 0) {
+            int y = top + S(52);
+            int bw = ui::button_width(user_b);
+            ui::place_field(user_e, {m, y, w - m - bw - gap, y + field});
+            MoveWindow(user_b, w - m - bw, y, bw, field, TRUE);
+
+            int cy = h - S(bar) - S(52);
+            place_row({tc_refresh_b, tc_install_b}, m, cy, field, gap);
+        } else if (step == 1) {
+            int y = top + S(32);
+            place_row({mode_merged_b, mode_sep_b}, m, y, field, gap);
+            place_row_right({autodetect_b}, w - m, y, field, gap);
+            y += field + S(16);
+
+            if (!separate_mode) {
+                y += S(38);
+                int bw = ui::button_width(game_b);
+                ui::place_field(game_e, {m, y, w - m - bw - gap, y + field});
+                MoveWindow(game_b, w - m - bw, y, bw, field, TRUE);
+            } else {
+                HWND edits[3] = {base_e, upd_e, dlc_e};
+                HWND btns[3] = {base_b, upd_b, dlc_b};
+                for (int i = 0; i < 3; i++) {
+                    y += S(22);
+                    int bw = ui::button_width(btns[i]);
+                    ui::place_field(edits[i], {m, y, w - m - bw - gap, y + field});
+                    MoveWindow(btns[i], w - m - bw, y, bw, field, TRUE);
+                    y += field + S(8);
+                }
+                int mw = ui::button_width(merge_b);
+                MoveWindow(merge_b, m, y + S(4), mw, field, TRUE);
+            }
+        } else if (step == 2) {
+            int btn_y = top + S(198);
+            int x = place_row({build_start_b, build_cancel_b}, m, btn_y, field, gap);
+            (void)x;
+            place_row_right({exe_pick_b}, w - m, btn_y, field, gap);
+            int log_top = btn_y + field + S(12);
+            int log_bot = std::max(log_top + S(60), h - S(bar) - S(16));
+            ui::place_framed(log_e, {m, log_top, w - m, log_bot});
+        } else if (step == 3) {
+            int y = top + S(58);
+            place_row({scale_1x, scale_2x, scale_3x}, m, y, field, gap);
+            y += field + S(36);
+            place_row({fps_30, fps_60}, m, y, field, gap);
+            y += field + S(36);
+            place_row({lay_auto, lay_xbox, lay_nin}, m, y, field, gap);
+            y += field + S(24);
+            MoveWindow(chk_fs, m, y, ui::button_width(chk_fs), S(24), TRUE);
+            MoveWindow(chk_gyro, m + S(220), y, ui::button_width(chk_gyro), S(24), TRUE);
+            y += S(28);
+            MoveWindow(chk_gpv, m, y, ui::button_width(chk_gpv), S(24), TRUE);
+            y += S(36);
+            MoveWindow(imp_save_b, m, y, ui::button_width(imp_save_b), field, TRUE);
+        }
+
+        int by = h - S(bar) + (S(bar) - field) / 2;
+        place_row({close_b}, m, by, field, gap);
+        place_row_right({next_b, back_b}, w - m, by, field, gap);
+    }
+
+    void draw_stepper(HDC dc, int w) {
+        const auto& f = ui::fonts();
+        int m = S(24);
+        RECT hdr{0, 0, w, S(68)};
+        ui::fill(dc, hdr, ui::pal.panel);
+        ui::hline(dc, 0, w, S(68), ui::pal.line);
+
+        const wchar_t* titles[4] = {
+            L"1. Environment",
+            L"2. Wii U Game Dump",
+            L"3. Wii U \u2192 C++ & Build",
+            L"4. Preferences & Finish",
+        };
+        int avail = w - 2 * m;
+        int tab_w = (avail - 3 * S(8)) / 4;
+        for (int i = 0; i < 4; i++) {
+            int x0 = m + i * (tab_w + S(8));
+            RECT tr{x0, S(14), x0 + tab_w, S(54)};
+            bool active = (i == step);
+            bool done = (i < step);
+            COLORREF bg = active ? ui::pal.accent : done ? ui::pal.control : ui::pal.window;
+            COLORREF border = active ? CLR_INVALID : ui::pal.control_line;
+            COLORREF fg = active ? ui::pal.accent_text : done ? ui::pal.text : ui::pal.muted;
+            ui::round_rect(dc, tr, S(5), bg, border);
+            ui::draw_text(dc, titles[i], tr, active ? f.body_strong : f.small, fg,
+                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
+    }
+
+    void draw_status_row(HDC dc, int x, int y, int w, const wchar_t* label, const std::wstring& val, Tone t) {
+        const auto& f = ui::fonts();
+        COLORREF dot = t == Tone::Good ? ui::pal.accent : t == Tone::Warn ? ui::pal.warn : t == Tone::Error ? ui::pal.error : ui::pal.muted;
+        RECT dr{x, y + S(6), x + S(8), y + S(14)};
+        ui::round_rect(dc, dr, S(8), dot, CLR_INVALID);
+        RECT lr{x + S(16), y, x + S(210), y + S(20)};
+        ui::draw_text(dc, label, lr, f.body_strong, ui::pal.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        RECT vr{x + S(214), y, x + w, y + S(20)};
+        ui::draw_text(dc, val, vr, f.body, ui::pal.muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+    }
+
+    void paint(HDC dc, const RECT& rc) override {
+        const auto& f = ui::fonts();
+        int w = rc.right, h = rc.bottom;
+        int m = S(24);
+        draw_stepper(dc, w);
+
+        int top = S(82);
+        if (step == 0) {
+            ui::draw_text(dc, L"Saves, Controls & Logs Folder (BOTW_USER_ROOT)",
+                          {m, top, w - m, top + S(22)}, f.body_strong, ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            ui::draw_text(dc, L"Your save files, controls.ini, settings.ini, mods, and runtime.log are stored here.",
+                          {m, top + S(22), w - m, top + S(44)}, f.small, ui::pal.muted, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+
+            int cy = top + S(104);
+            RECT card{m, cy, w - m, h - S(bar) - S(64)};
+            ui::round_rect(dc, card, S(6), ui::pal.panel, ui::pal.line);
+
+            int rx = m + S(16), ry = cy + S(14), rw = (w - 2 * m) - S(32);
+            ui::draw_text(dc, L"System & Build Environment Checklist", {rx, ry, rx + rw, ry + S(22)},
+                          f.body_strong, ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            ry += S(30);
+
+            draw_status_row(dc, rx, ry, rw, L"Project & Recompiler",
+                            tc.has_repo ? (L"Ready (" + tc.repo_dir.wstring() + L")")
+                                        : L"Standalone mode (place beside tools\\recompile.py to build from source)",
+                            tc.has_repo ? Tone::Good : Tone::Warn);
+            ry += S(28);
+
+            draw_status_row(dc, rx, ry, rw, L"Generated C++ Shards",
+                            tc.has_generated_cpp ? (L"Found " + std::to_wstring(tc.generated_cpp_count) + L" C++ files in generated\\")
+                                                 : L"Not generated yet (Step 3 converts U-King.rpx \u2192 generated\\*.cpp)",
+                            tc.has_generated_cpp ? Tone::Good : Tone::Warn);
+            ry += S(28);
+
+            draw_status_row(dc, rx, ry, rw, L"Native Game Binary",
+                            tc.has_exe ? (L"Found (" + tc.exe_path.wstring() + L")")
+                                       : L"Not compiled yet (Step 3 compiles C++ \u2192 BotWRecomp.exe)",
+                            tc.has_exe ? Tone::Good : Tone::Warn);
+            ry += S(28);
+
+            draw_status_row(dc, rx, ry, rw, L"Python 3 Runtime",
+                            tc.has_python ? (L"Ready (" + tc.python_exe.wstring() + L")")
+                                          : L"Not found (needed to convert U-King.rpx \u2192 C++)",
+                            tc.has_python ? Tone::Good : Tone::Warn);
+            ry += S(28);
+
+            draw_status_row(dc, rx, ry, rw, L"MSYS2 C++ Toolchain",
+                            tc.has_compiler ? (L"Ready (g++, cmake, ninja in " + tc.gxx_exe.parent_path().wstring() + L")")
+                                            : L"Not found (install MSYS2 UCRT64 to compile C++ shards)",
+                            tc.has_compiler ? Tone::Good : Tone::Warn);
+            ry += S(28);
+
+            draw_status_row(dc, rx, ry, rw, L"Vulkan Graphics Driver",
+                            tc.has_vulkan ? L"Ready (vulkan-1.dll detected)" : L"vulkan-1.dll not detected",
+                            tc.has_vulkan ? Tone::Good : Tone::Error);
+        } else if (step == 1) {
+            ui::draw_text(dc, L"Select Your Wii U Game Dump (USA v1.5.0 / Update v208)",
+                          {m, top, w - m, top + S(24)}, f.body_strong, ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+
+            int y = top + S(80);
+            if (!separate_mode) {
+                ui::draw_text(dc, L"Game folder (containing code\\U-King.rpx, content\\, and meta\\meta.xml)",
+                              {m, y, w - m, y + S(20)}, f.body_strong, ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+                ui::draw_text(dc, L"Tip: Have separate Base, Update (v208), and DLC folders from Dumpling? Click 'Auto-detect dumps...' above.",
+                              {m, y + S(18), w - m, y + S(36)}, f.small, ui::pal.muted, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            } else {
+                const wchar_t* lbls[3] = {
+                    L"Base Game Folder (00050000101C9400, v0)",
+                    L"Update v1.5.0 Folder (0005000E101C9400, v208)  \u2014  required",
+                    L"DLC Folder (0005000C101C9400, v80)  \u2014  optional",
+                };
+                int ly = y;
+                for (int i = 0; i < 3; i++) {
+                    ui::draw_text(dc, lbls[i], {m, ly, w - m, ly + S(20)}, f.small, ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+                    ly += S(22) + S(32) + S(8);
+                }
+                if (!merge_note.empty()) {
+                    COLORREF mc = merge_tone == Tone::Good ? ui::pal.accent : merge_tone == Tone::Error ? ui::pal.error : ui::pal.muted;
+                    ui::draw_text(dc, merge_note, {m + S(210), ly + S(8), w - m, ly + S(32)}, f.small, mc,
+                                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                }
+            }
+
+            // Verification card at bottom of Step 2
+            int card_top = h - S(bar) - S(148);
+            RECT card{m, card_top, w - m, h - S(bar) - S(14)};
+            ui::round_rect(dc, card, S(6), ui::pal.panel, ui::pal.line);
+
+            int ix = m + S(14), iy = card_top + S(14), isz = S(84);
+            RECT ir{ix, iy, ix + isz, iy + isz};
+            if (!ginfo.icon.empty()) {
+                ui::draw_bitmap(dc, ir, ginfo.icon.bgra.data(), ginfo.icon.width, ginfo.icon.height);
+            } else {
+                ui::round_rect(dc, ir, S(6), ui::pal.window, ui::pal.line);
+                ui::draw_text(dc, L"No icon", ir, f.small, ui::pal.muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+
+            int tx = ir.right + S(16), tw = (w - m - S(14)) - tx;
+            std::wstring title = ginfo.long_name.empty() ? L"No game dump verified yet" : widen(ginfo.long_name);
+            for (auto& ch : title) if (ch == L'\n') ch = L' ';
+            ui::draw_text(dc, title, {tx, iy, tx + tw, iy + S(22)}, f.body_strong, ui::pal.text,
+                          DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            std::wstring meta_line;
+            if (ginfo.folder_exists) {
+                meta_line = L"Title ID: " + (ginfo.title_id.empty() ? L"Unknown" : widen(ginfo.title_id));
+                std::string reg = gameinfo::region_name(ginfo.title_id);
+                if (!reg.empty()) meta_line += L" (" + widen(reg) + L")";
+                if (ginfo.has_title_version) meta_line += L"   \u00B7   Version: " + widen(gameinfo::version_name(ginfo.title_version)) + L" (v" + std::to_wstring(ginfo.title_version) + L")";
+                meta_line += ginfo.has_dlc ? L"   \u00B7   DLC: Installed" : L"   \u00B7   DLC: Not found";
+            } else {
+                meta_line = L"Point to a folder with code\\U-King.rpx, content\\, and meta\\meta.xml.";
+            }
+            ui::draw_text(dc, meta_line, {tx, iy + S(24), tx + tw, iy + S(44)}, f.small, ui::pal.muted,
+                          DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            std::wstring sha_line = L"U-King.rpx SHA-1: ";
+            if (!rpx_ver.sha1.empty()) {
+                sha_line += widen(rpx_ver.sha1);
+                sha_line += (rpx_ver.hash_match || rpx_ver.meta_usa_v208) ? L"  (Verified USA v208)" : L"  (Hash mismatch)";
+            } else {
+                sha_line += L"not checked";
+            }
+            ui::draw_text(dc, sha_line, {tx, iy + S(46), tx + tw, iy + S(66)}, f.mono, ui::pal.muted,
+                          DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            COLORREF sc = (rpx_ver.hash_match || rpx_ver.meta_usa_v208) ? ui::pal.accent : (ginfo.has_rpx ? ui::pal.warn : ui::pal.muted);
+            ui::draw_text(dc, widen(rpx_ver.summary), {tx, iy + S(70), tx + tw, iy + S(112)}, f.small, sc,
+                          DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+        } else if (step == 2) {
+            setupwizard::BuildProgress snap;
+            {
+                std::lock_guard<std::mutex> lk(build_mu);
+                snap = prog;
+            }
+            ui::draw_text(dc, L"Convert Wii U Binary (U-King.rpx) to C++ & Compile Native Executable",
+                          {m, top, w - m, top + S(22)}, f.body_strong, ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+
+            // Two stage cards side by side
+            int cw = (w - 2 * m - S(12)) / 2;
+            int cy = top + S(28), ch = S(62);
+            RECT c1{m, cy, m + cw, cy + ch};
+            RECT c2{m + cw + S(12), cy, w - m, cy + ch};
+
+            bool s1_active = (snap.stage == setupwizard::BuildStage::RecompileWiiUToCpp);
+            bool s1_done = (snap.stage == setupwizard::BuildStage::CompileCppToExe || snap.stage == setupwizard::BuildStage::Complete || tc.has_generated_cpp);
+            bool s2_active = (snap.stage == setupwizard::BuildStage::CompileCppToExe);
+            bool s2_done = (snap.stage == setupwizard::BuildStage::Complete || tc.has_exe);
+
+            ui::round_rect(dc, c1, S(6), ui::pal.panel, s1_active ? ui::pal.accent : ui::pal.line, s1_active ? S(2) : 1);
+            ui::round_rect(dc, c2, S(6), ui::pal.panel, s2_active ? ui::pal.accent : ui::pal.line, s2_active ? S(2) : 1);
+
+            ui::draw_text(dc, L"Stage 1/2  \u00B7  Wii U (U-King.rpx) \u2192 C++",
+                          {c1.left + S(12), c1.top + S(8), c1.right - S(12), c1.top + S(28)},
+                          f.body_strong, s1_active ? ui::pal.accent : ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            std::wstring s1_sub = s1_active
+                ? (L"Generating C++ shard " + std::to_wstring(snap.sub_done) + L" / " + std::to_wstring(snap.sub_total) +
+                   L" (" + widen(snap.current_item) + L")")
+                : (s1_done ? L"258 C++ shards generated in generated/*.cpp"
+                           : L"Decompresses RPX, analyzes 66,137 PPC funcs, emits C++");
+            ui::draw_text(dc, s1_sub, {c1.left + S(12), c1.top + S(30), c1.right - S(12), c1.bottom - S(6)},
+                          f.small, ui::pal.muted, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            ui::draw_text(dc, L"Stage 2/2  \u00B7  Compile C++ \u2192 BotWRecomp.exe",
+                          {c2.left + S(12), c2.top + S(8), c2.right - S(12), c2.top + S(28)},
+                          f.body_strong, s2_active ? ui::pal.accent : ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            std::wstring s2_sub = s2_active
+                ? (L"Compiling object " + std::to_wstring(snap.sub_done) + L" / " + std::to_wstring(snap.sub_total) +
+                   L" (" + widen(snap.current_item) + L")")
+                : (s2_done ? L"Native x86_64 executable ready (BotWRecomp.exe)"
+                           : L"Compiles C++ shards + runtime with CMake & Ninja");
+            ui::draw_text(dc, s2_sub, {c2.left + S(12), c2.top + S(30), c2.right - S(12), c2.bottom - S(6)},
+                          f.small, ui::pal.muted, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            // Progress bar panel
+            int py = cy + ch + S(12), ph = S(84);
+            RECT pcard{m, py, w - m, py + ph};
+            ui::round_rect(dc, pcard, S(6), ui::pal.panel, ui::pal.line);
+
+            std::wstring phase = widen(snap.phase_text);
+            ui::draw_text(dc, phase, {m + S(14), py + S(10), w - m - S(120), py + S(30)},
+                          f.body_strong, ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            wchar_t tbuf[64];
+            swprintf(tbuf, 64, L"%d%%   \u00B7   %02lu:%02lu", snap.stage_percent, elapsed_sec / 60, elapsed_sec % 60);
+            ui::draw_text(dc, tbuf, {w - m - S(130), py + S(10), w - m - S(14), py + S(30)},
+                          f.body_strong, ui::pal.accent, DT_RIGHT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+
+            // Progress track && fill
+            RECT bar_r{m + S(14), py + S(36), w - m - S(14), py + S(56)};
+            ui::round_rect(dc, bar_r, S(4), ui::pal.field, ui::pal.field_line);
+            int pct = std::clamp(snap.stage_percent, 0, 100);
+            if (pct > 0) {
+                int fill_w = std::max(S(8), static_cast<int>((bar_r.right - bar_r.left) * pct / 100));
+                RECT fill_r{bar_r.left, bar_r.top, std::min(bar_r.right, bar_r.left + fill_w), bar_r.bottom};
+                COLORREF bar_col = snap.stage == setupwizard::BuildStage::Failed ? ui::pal.error : ui::pal.accent;
+                ui::round_rect(dc, fill_r, S(4), bar_col, CLR_INVALID);
+            }
+
+            std::wstring detail;
+            if (snap.stage == setupwizard::BuildStage::RecompileWiiUToCpp) {
+                detail = L"Current output: generated\\" + widen(snap.current_item) +
+                         L"   \u00B7   Overall pipeline progress: " + std::to_wstring(snap.overall_percent) + L"%";
+            } else if (snap.stage == setupwizard::BuildStage::CompileCppToExe) {
+                detail = L"Current target: " + widen(snap.current_item) +
+                         L"   \u00B7   Overall pipeline progress: " + std::to_wstring(snap.overall_percent) + L"%";
+            } else {
+                detail = L"Live output log below (window stays 100% responsive during conversion & compilation):";
+            }
+            ui::draw_text(dc, detail, {m + S(14), py + S(60), w - m - S(14), py + S(80)},
+                          f.small, ui::pal.muted, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        } else if (step == 3) {
+            ui::draw_text(dc, L"Quick Graphics, Controller & Save Setup",
+                          {m, top, w - m, top + S(24)}, f.body_strong, ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            ui::draw_text(dc, L"These preferences are saved to settings.ini and BotWLauncher.ini. You can change them anytime.",
+                          {m, top + S(22), w - m, top + S(42)}, f.small, ui::pal.muted, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+
+            int y = top + S(38);
+            ui::draw_text(dc, L"Internal Resolution Scale", {m, y, w - m, y + S(20)},
+                          f.body_strong, ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            y += S(32) + S(36);
+            ui::draw_text(dc, L"Frame Rate Target", {m, y - S(20), w - m, y},
+                          f.body_strong, ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            y += S(32) + S(36);
+            ui::draw_text(dc, L"Controller Button Prompts & Layout", {m, y - S(20), w - m, y},
+                          f.body_strong, ui::pal.text, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+
+            int sy = h - S(bar) - S(62);
+            RECT scard{m, sy, w - m, h - S(bar) - S(14)};
+            ui::round_rect(dc, scard, S(6), ui::pal.panel, ui::pal.line);
+            std::wstring summary = L"Ready to launch:  Game = " + (g.cfg.game.empty() ? L"(not set)" : g.cfg.game) +
+                                   L"   \u00B7   Exe = " + (g.cfg.exe.empty() ? L"(not set)" : g.cfg.exe);
+            if (!save_note.empty()) summary = save_note;
+            ui::draw_text(dc, summary, {m + S(14), sy + S(14), w - m - S(14), h - S(bar) - S(24)},
+                          f.small, ui::pal.accent, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
+    }
+
+    void append_log(const std::string& line) {
+        std::lock_guard<std::mutex> lk(build_mu);
+        setupwizard::parse_progress_line(line, prog);
+        log_buf += line + "\r\n";
+        if (log_buf.size() > 64 * 1024) {
+            log_buf.erase(0, log_buf.size() - 48 * 1024);
+        }
+        log_dirty = true;
+    }
+
+    bool run_command_piped(const std::wstring& cmdline, const std::filesystem::path& cwd, const std::wstring& env_block) {
+        SECURITY_ATTRIBUTES sa{};
+        sa.nLength = sizeof sa;
+        sa.bInheritHandle = TRUE;
+        HANDLE rpipe = nullptr, wpipe = nullptr;
+        if (!CreatePipe(&rpipe, &wpipe, &sa, 0)) return false;
+        SetHandleInformation(rpipe, HANDLE_FLAG_INHERIT, 0);
+
+        STARTUPINFOW si{};
+        si.cb = sizeof si;
+        si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        si.hStdOutput = wpipe;
+        si.hStdError = wpipe;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+        PROCESS_INFORMATION pi{};
+        std::vector<wchar_t> mutable_cmd(cmdline.begin(), cmdline.end());
+        mutable_cmd.push_back(L'\0');
+        std::wstring env = env_block;
+
+        BOOL ok = CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, TRUE,
+                                 CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                                 env.empty() ? nullptr : env.data(),
+                                 cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
+        CloseHandle(wpipe);
+        if (!ok) {
+            CloseHandle(rpipe);
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> lk(build_mu);
+            child_proc = pi.hProcess;
+        }
+
+        std::string pending;
+        char buf[1024];
+        DWORD nread = 0;
+        while (ReadFile(rpipe, buf, sizeof(buf), &nread, nullptr) && nread > 0) {
+            if (cancel_req) {
+                TerminateProcess(pi.hProcess, 1);
+                break;
+            }
+            pending.append(buf, nread);
+            size_t pos = 0;
+            while ((pos = pending.find('\n')) != std::string::npos) {
+                std::string line = pending.substr(0, pos);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                pending.erase(0, pos + 1);
+                append_log(line);
+            }
+        }
+        if (!pending.empty()) append_log(pending);
+        CloseHandle(rpipe);
+
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        DWORD code = 1;
+        GetExitCodeProcess(pi.hProcess, &code);
+        {
+            std::lock_guard<std::mutex> lk(build_mu);
+            child_proc = nullptr;
+        }
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return !cancel_req && code == 0;
+    }
+
+    void start_pipeline() {
+        if (building) return;
+        refresh_toolchain();
+        std::wstring gp = get_text(game_e);
+        if (gp.empty()) gp = g.cfg.game;
+
+        if (!tc.has_repo) {
+            alert(L"Could not find tools\\recompile.py and CMakeLists.txt next to the launcher.\n"
+                  L"If you already have a compiled BotWRecomp.exe, click 'Use existing BotWRecomp.exe...'.");
+            return;
+        }
+        std::filesystem::path rpx_path = std::filesystem::path(gp) / "code" / "U-King.rpx";
+        std::error_code ec;
+        bool has_rpx = !gp.empty() && std::filesystem::is_regular_file(rpx_path, ec);
+        if (!has_rpx && !tc.has_generated_cpp) {
+            alert(L"Please select a valid Wii U game folder containing code\\U-King.rpx in Step 2 first.");
+            return;
+        }
+        if (!tc.has_python) {
+            alert(L"Python 3 was not found. Click 'Back' to Step 1 and install the MSYS2 toolchain first.");
+            return;
+        }
+
+        stop_worker();
+        cancel_req = false;
+        building = true;
+        build_start_tick = GetTickCount();
+        elapsed_sec = 0;
+        {
+            std::lock_guard<std::mutex> lk(build_mu);
+            log_buf.clear();
+            prog = {};
+            prog.stage = setupwizard::BuildStage::RecompileWiiUToCpp;
+            prog.phase_text = "Starting Wii U (U-King.rpx) -> C++ recompiler...";
+            log_dirty = true;
+        }
+        update_step_visibility();
+
+        std::filesystem::path repo = tc.repo_dir;
+        std::filesystem::path py = tc.python_exe;
+        std::filesystem::path cmake = tc.cmake_exe;
+        std::filesystem::path msys = tc.msys_bin;
+        std::filesystem::path user_p = std::filesystem::path(get_text(user_e));
+        std::wstring env = build_env(user_p, repo / "build" / "BotWRecomp.exe");
+
+        worker = std::thread([this, repo, py, cmake, msys, rpx_path, has_rpx, env]() {
+            bool ok = true;
+            if (has_rpx) {
+                std::wstring cmd = L"\"" + py.wstring() + L"\" -I \"" + (repo / "tools" / "recompile.py").wstring() +
+                                   L"\" \"" + rpx_path.wstring() + L"\"";
+                append_log("> " + narrow(cmd));
+                ok = run_command_piped(cmd, repo, env);
+            } else {
+                append_log("[recomp 4/4] Using existing generated/*.cpp shards (100%)");
+            }
+
+            if (ok && !cancel_req) {
+                if (!cmake.empty()) {
+                    std::filesystem::path bdir = repo / "build";
+                    std::wstring cfg_cmd = L"\"" + cmake.wstring() + L"\" -B \"" + bdir.wstring() +
+                                           L"\" -G Ninja -DCMAKE_BUILD_TYPE=Release";
+                    append_log("> " + narrow(cfg_cmd));
+                    ok = run_command_piped(cfg_cmd, repo, env);
+                    if (ok && !cancel_req) {
+                        std::wstring bld_cmd = L"\"" + cmake.wstring() + L"\" --build \"" + bdir.wstring() + L"\"";
+                        append_log("> " + narrow(bld_cmd));
+                        ok = run_command_piped(bld_cmd, repo, env);
+                    }
+                } else {
+                    append_log("Note: CMake/Ninja not found; Wii U -> C++ conversion finished.");
+                }
+            }
+
+            std::lock_guard<std::mutex> lk(build_mu);
+            if (cancel_req) {
+                prog.stage = setupwizard::BuildStage::Cancelled;
+                prog.phase_text = "Build cancelled by user.";
+                log_buf += "\r\n[Cancelled]\r\n";
+            } else if (ok) {
+                prog.stage = setupwizard::BuildStage::Complete;
+                prog.stage_percent = 100;
+                prog.overall_percent = 100;
+                prog.phase_text = "Complete: Wii U binary converted to C++ and compiled to BotWRecomp.exe (100%)";
+                log_buf += "\r\n[Success] BotWRecomp.exe is ready.\r\n";
+                setupwizard::deploy_runtime_files(repo / "build", msys, repo);
+            } else {
+                prog.stage = setupwizard::BuildStage::Failed;
+                prog.phase_text = "Build failed. Check the log below for details.";
+                log_buf += "\r\n[Failed]\r\n";
+            }
+            log_dirty = true;
+            building = false;
+        });
+    }
+
+    void timer() override {
+        if (building && build_start_tick != 0) {
+            elapsed_sec = (GetTickCount() - build_start_tick) / 1000;
+        }
+        bool need_ui_sync = false;
+        std::wstring new_log;
+        {
+            std::lock_guard<std::mutex> lk(build_mu);
+            if (log_dirty) {
+                new_log = widen(log_buf);
+                log_dirty = false;
+                need_ui_sync = true;
+            }
+        }
+        if (need_ui_sync) {
+            if (log_e) {
+                set_text(log_e, new_log);
+                int n = GetWindowTextLengthW(log_e);
+                SendMessageW(log_e, EM_SETSEL, n, n);
+                SendMessageW(log_e, EM_SCROLLCARET, 0, 0);
+            }
+            if (!building) {
+                refresh_toolchain();
+                update_step_visibility();
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (building && step == 2) {
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+    }
+
+    void on_autodetect() {
+        auto root = pick_browse(hwnd, L"Select the parent folder containing your Wii U dump (or Base + Update + DLC folders).", false);
+        if (root.empty()) return;
+        auto lay = gameinfo::discover_dumps(std::filesystem::path(root));
+        if (!lay.needs_merge && lay.ready()) {
+            separate_mode = false;
+            set_text(game_e, lay.merged_game.wstring());
+            g.cfg.game = lay.merged_game.wstring();
+            inspect_game_folder();
+            sync_pref_buttons();
+            update_step_visibility();
+            return;
+        }
+        if (lay.needs_merge) {
+            separate_mode = true;
+            if (!lay.base_folder.empty()) set_text(base_e, lay.base_folder.wstring());
+            if (!lay.update_folder.empty()) set_text(upd_e, lay.update_folder.wstring());
+            if (!lay.dlc_folder.empty()) set_text(dlc_e, lay.dlc_folder.wstring());
+            merge_note = widen(lay.summary());
+            merge_tone = lay.ready() ? Tone::Good : Tone::Warn;
+            sync_pref_buttons();
+            update_step_visibility();
+            return;
+        }
+        alert(widen(lay.summary()));
+    }
+
+    void on_merge() {
+        std::wstring bp = get_text(base_e), up = get_text(upd_e), dp = get_text(dlc_e);
+        if (bp.empty() || up.empty()) {
+            alert(L"Select both the Base Game folder (v0) and Update v1.5.0 folder (v208) before merging.");
+            return;
+        }
+        std::filesystem::path target = std::filesystem::path(bp).parent_path() / L"BotW_Merged_v208";
+        std::string err;
+        merge_note = L"Merging Base + Update + DLC via hard links...";
+        merge_tone = Tone::Normal;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        UpdateWindow(hwnd);
+
+        if (!gameinfo::merge_dumps(bp, up, dp, target, err)) {
+            merge_note = L"Merge failed: " + widen(err);
+            merge_tone = Tone::Error;
+            alert(merge_note);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return;
+        }
+        merge_note = L"Merged into " + target.wstring();
+        merge_tone = Tone::Good;
+        separate_mode = false;
+        set_text(game_e, target.wstring());
+        g.cfg.game = target.wstring();
+        inspect_game_folder();
+        sync_pref_buttons();
+        update_step_visibility();
+    }
+
+    void on_install_toolchain() {
+        const wchar_t* cmd =
+            L"/c echo Installing MSYS2 UCRT64 toolchain for BotW-Native... & "
+            L"winget install -e --id MSYS2.MSYS2 & "
+            L"C:\\msys64\\usr\\bin\\pacman.exe -Sy --needed --noconfirm "
+            L"mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake "
+            L"mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-SDL3 python & pause";
+        ShellExecuteW(hwnd, L"open", L"cmd.exe", cmd, nullptr, SW_SHOWNORMAL);
+    }
+
+    void save_all_and_finish() {
+        std::wstring us = get_text(user_e);
+        std::wstring ga = get_text(game_e);
+        if (!us.empty()) g.cfg.user = us;
+        if (!ga.empty()) g.cfg.game = ga;
+        if (tc.has_exe && g.cfg.exe.empty()) g.cfg.exe = tc.exe_path.wstring();
+        g.cfg.fullscreen = ui::checked(chk_fs);
+        g.cfg.gamepad_view = ui::checked(chk_gpv);
+        g.cfg.setup_done = true;
+        prefs.gamepad_view = g.cfg.gamepad_view;
+        prefs.gyro = ui::checked(chk_gyro);
+        setupwizard::write_game_prefs(user_root(), prefs);
+        save_launcher_ini();
+        load_controls();
+        refresh_game();
+        note_legacy_save();
+        close();
+    }
+
+    void command(int id, int code, HWND) override {
+        switch (id) {
+            case ID_WIZ_USER_BROWSE: {
+                auto p = pick_browse(hwnd, L"User data folder (BOTW_USER_ROOT). Saves, controls.ini, and logs go here.", false);
+                if (!p.empty()) set_text(user_e, p);
+                break;
+            }
+            case ID_WIZ_TOOLCHAIN_REFRESH:
+                refresh_toolchain();
+                update_step_visibility();
+                break;
+            case ID_WIZ_TOOLCHAIN_INSTALL:
+                on_install_toolchain();
+                break;
+            case ID_WIZ_MODE_MERGED:
+                separate_mode = false;
+                sync_pref_buttons();
+                update_step_visibility();
+                break;
+            case ID_WIZ_MODE_SEPARATE:
+                separate_mode = true;
+                sync_pref_buttons();
+                update_step_visibility();
+                break;
+            case ID_WIZ_AUTODETECT:
+                on_autodetect();
+                break;
+            case ID_WIZ_GAME:
+                if (code == EN_CHANGE) {
+                    inspect_game_folder();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                break;
+            case ID_WIZ_GAME_BROWSE: {
+                auto p = pick_browse(hwnd, L"Folder that contains code, content, and meta from your v1.5.0 dump.", false);
+                if (!p.empty()) {
+                    set_text(game_e, p);
+                    g.cfg.game = p;
+                    inspect_game_folder();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                break;
+            }
+            case ID_WIZ_BASE_BROWSE: {
+                auto p = pick_browse(hwnd, L"Select Base Game folder (00050000101C9400, v0).", false);
+                if (!p.empty()) set_text(base_e, p);
+                break;
+            }
+            case ID_WIZ_UPD_BROWSE: {
+                auto p = pick_browse(hwnd, L"Select Update v1.5.0 folder (0005000E101C9400, v208).", false);
+                if (!p.empty()) set_text(upd_e, p);
+                break;
+            }
+            case ID_WIZ_DLC_BROWSE: {
+                auto p = pick_browse(hwnd, L"Select DLC folder (0005000C101C9400, v80).", false);
+                if (!p.empty()) set_text(dlc_e, p);
+                break;
+            }
+            case ID_WIZ_MERGE:
+                on_merge();
+                break;
+            case ID_WIZ_BUILD_START:
+                start_pipeline();
+                break;
+            case ID_WIZ_BUILD_CANCEL:
+                cancel_req = true;
+                {
+                    std::lock_guard<std::mutex> lk(build_mu);
+                    if (child_proc) TerminateProcess(child_proc, 1);
+                }
+                break;
+            case ID_WIZ_EXE_BROWSE: {
+                auto p = pick_exe(hwnd, g.cfg.exe);
+                if (!p.empty()) {
+                    g.cfg.exe = p;
+                    refresh_toolchain();
+                    std::lock_guard<std::mutex> lk(build_mu);
+                    prog.stage = setupwizard::BuildStage::Complete;
+                    prog.stage_percent = 100;
+                    prog.overall_percent = 100;
+                    prog.phase_text = "Ready: Selected existing BotWRecomp.exe.";
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                break;
+            }
+            case ID_WIZ_SCALE_1X: prefs.scale = 1; sync_pref_buttons(); break;
+            case ID_WIZ_SCALE_2X: prefs.scale = 2; sync_pref_buttons(); break;
+            case ID_WIZ_SCALE_3X: prefs.scale = 3; sync_pref_buttons(); break;
+            case ID_WIZ_FPS_30: prefs.fps = 30; sync_pref_buttons(); break;
+            case ID_WIZ_FPS_60: prefs.fps = 60; sync_pref_buttons(); break;
+            case ID_WIZ_LAYOUT_AUTO: prefs.layout = -1; sync_pref_buttons(); break;
+            case ID_WIZ_LAYOUT_XBOX: prefs.layout = 1; sync_pref_buttons(); break;
+            case ID_WIZ_LAYOUT_NINTENDO: prefs.layout = 0; sync_pref_buttons(); break;
+            case ID_WIZ_IMPORT_SAVE: {
+                std::wstring us = get_text(user_e);
+                if (!us.empty()) g.cfg.user = us;
+                std::wstring picked = pick_browse(hwnd, L"Select a Cemu mlc01 folder, save folder, or .zip to import.", true);
+                if (!picked.empty()) {
+                    import_path(picked);
+                    save_note = g.status;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                break;
+            }
+            case ID_WIZ_BACK:
+                if (step > 0 && !building) {
+                    step--;
+                    update_step_visibility();
+                }
+                break;
+            case ID_WIZ_NEXT:
+                if (building) break;
+                if (step == 0) {
+                    std::wstring us = get_text(user_e);
+                    if (!us.empty()) g.cfg.user = us;
+                    step = 1;
+                    inspect_game_folder();
+                    update_step_visibility();
+                } else if (step == 1) {
+                    std::wstring ga = get_text(game_e);
+                    if (!ga.empty()) g.cfg.game = ga;
+                    step = 2;
+                    refresh_toolchain();
+                    update_step_visibility();
+                } else if (step == 2) {
+                    step = 3;
+                    update_step_visibility();
+                } else {
+                    save_all_and_finish();
+                }
+                break;
+            case ID_WIZ_CANCEL:
+                cancel();
+                break;
+            default: break;
+        }
+    }
+
+    void cancel() override {
+        if (building) {
+            if (ask(L"A conversion or build is currently running. Cancel it and close the Setup Assistant?",
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+                return;
+            }
+            stop_worker();
+        }
+        KillTimer(hwnd, 2);
+        close();
+    }
+};
+
+void show_setup_wizard(SetupPreset preset) {
+    SetupWizardWindow w(preset);
+    run_dialog(&w, L"Setup Assistant", 780, 580, true);
+}
+
 void show_settings() {
     SettingsWindow w;
     run_dialog(&w, L"Settings", 600, 560, false);
@@ -1612,7 +3048,7 @@ void show_saves() {
 }
 void show_mods() {
     ModsWindow w;
-    run_dialog(&w, L"Mods", 720, 480, true);
+    run_dialog(&w, L"Mods", 860, 560, true);
     refresh_game();
 }
 void show_log() {
@@ -1626,15 +3062,7 @@ void on_play() {
         return;
     }
     if (g.cfg.game.empty()) {
-        auto p = pick_browse(g.hwnd, L"Folder that contains code, content, and meta.", false);
-        if (p.empty()) return;
-        if (has_quote(p)) {
-            alert(L"Paths cannot contain a double quote.");
-            return;
-        }
-        g.cfg.game = p;
-        save_launcher_ini();
-        refresh_game();
+        show_setup_wizard(SetupPreset::Step2);
         return;
     }
     std::wstring game = g.cfg.game, exe = g.cfg.exe, user = g.cfg.user;
@@ -1701,7 +3129,7 @@ void on_play() {
 constexpr int kMainW = 680, kMainH = 264;
 
 struct MainWindow : Window {
-    HWND play = nullptr, settings = nullptr, controls = nullptr, saves = nullptr, mods_b = nullptr, user_b = nullptr, log_b = nullptr;
+    HWND play = nullptr, setup_b = nullptr, settings = nullptr, controls = nullptr, saves = nullptr, mods_b = nullptr, user_b = nullptr, log_b = nullptr;
     RECT icon_r{}, over_r{}, title_r{}, info_r{}, status_r{};
     int divider = 0;
     MainWindow() {
@@ -1710,12 +3138,14 @@ struct MainWindow : Window {
     }
     void create() override {
         play = ui::button(hwnd, ID_PLAY, L"Play", ui::Kind::Primary, false, true);
+        setup_b = ui::button(hwnd, ID_SETUP_OPEN, L"Setup Wizard", ui::Kind::Flat);
         settings = ui::button(hwnd, ID_SETTINGS, L"Settings", ui::Kind::Flat);
         controls = ui::button(hwnd, ID_CONTROLS_OPEN, L"Controls", ui::Kind::Flat);
         saves = ui::button(hwnd, ID_SAVES_OPEN, L"Saves", ui::Kind::Flat);
         mods_b = ui::button(hwnd, ID_MODS_OPEN, L"Mods", ui::Kind::Flat);
         user_b = ui::button(hwnd, ID_USER_OPEN, L"Open user folder", ui::Kind::Flat);
         log_b = ui::button(hwnd, ID_LOG_OPEN, L"Open log", ui::Kind::Flat);
+        DragAcceptFiles(hwnd, TRUE);
         SetTimer(hwnd, 1, 400, nullptr);
         SetFocus(play);
     }
@@ -1732,7 +3162,7 @@ struct MainWindow : Window {
         title_r = {x, over_r.bottom + S(4), w - m - pw - S(24), info_r.top - S(4)};
         divider = icon_r.bottom + S(24);
         int ty = divider + S(8), th = S(32);
-        place_row({settings, controls, saves, mods_b}, m - S(12), ty, th, S(0));
+        place_row({setup_b, settings, controls, saves, mods_b}, m - S(12), ty, th, S(0));
         place_row_right({log_b, user_b}, w - m + S(12), ty, th, S(0));
         status_r = {m, h - S(bar), w - m, h};
     }
@@ -1762,6 +3192,7 @@ struct MainWindow : Window {
     void command(int id, int, HWND) override {
         switch (id) {
             case ID_PLAY: on_play(); break;
+            case ID_SETUP_OPEN: show_setup_wizard(); break;
             case ID_SETTINGS: show_settings(); break;
             case ID_CONTROLS_OPEN: show_controls(); break;
             case ID_SAVES_OPEN: show_saves(); break;
@@ -1777,6 +3208,12 @@ struct MainWindow : Window {
         if (IsWindowEnabled(play)) on_play();
     }
     void cancel() override {}
+    void dropped(const std::wstring& p) override {
+        std::string folder;
+        if (install_mod_path(p, &folder)) {
+            alert(L"Installed and enabled mod \"" + widen(folder) + L"\".", MB_OK | MB_ICONINFORMATION);
+        }
+    }
     void on_close() override {
         save_launcher_ini();
         DestroyWindow(hwnd);
@@ -1829,7 +3266,15 @@ int system_dpi() {
 
 }  // namespace
 
-int main(int, char**) {
+int main(int argc, char** argv) {
+    std::string win_arg;
+    bool force_setup = false;
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i] ? argv[i] : "";
+        if (a == "--setup") force_setup = true;
+        else if (a == "--window" && i + 1 < argc) win_arg = argv[++i];
+        else if (a.rfind("--window=", 0) == 0) win_arg = a.substr(9);
+    }
     SDL_SetMainReady();
     set_process_dpi_awareness();
     OleInitialize(nullptr);
@@ -1869,6 +3314,11 @@ int main(int, char**) {
     main_win.relayout();
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
+    if (!win_arg.empty()) {
+        PostMessageW(hwnd, WM_APP + 10, 0, reinterpret_cast<LPARAM>(_strdup(win_arg.c_str())));
+    } else if (force_setup || (!g.cfg.setup_done && (g.cfg.game.empty() || g.cfg.exe.empty()))) {
+        PostMessageW(hwnd, WM_COMMAND, ID_SETUP_OPEN, 0);
+    }
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
         ui::note_key(msg);

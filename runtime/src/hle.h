@@ -39,6 +39,11 @@ uint32_t thunk(GuestFn fn, const char* name);
 uint32_t export_thunk(const char* lib, const char* name);
 const char* thunk_name(uint32_t addr);
 void add_import_stub(uint32_t addr, GuestFn fn, const char* lib, const char* name);
+bool is_function_entry(uint32_t addr);
+void override_fn_nop(uint32_t addr);
+void override_fn_ret_imm(uint32_t addr, uint32_t imm);
+bool redirect_fn(uint32_t addr, uint32_t target);
+void restore_fn_overrides();
 }  // namespace dispatch
 
 // Call guest code at `fn` with integer args in r3.. from HLE code; returns r3. The caller's

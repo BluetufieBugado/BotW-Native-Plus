@@ -1,7 +1,7 @@
 // Portable checks for meta.xml, iconTex.tga and mods.ini handling. Not part of the game.
-//   g++ -std=c++20 -I. launcher/launcher_data_test.cpp launcher/game_info.cpp launcher/mods.cpp -o launcher_data_test
 #include "game_info.h"
 #include "mods.h"
+#include "setup_wizard.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -83,11 +83,14 @@ void test_tga() {
 void test_mods(const fs::path& root) {
     fs::remove_all(root);
     write_text(root / "mods" / "Beta" / "rules.txt",
-               "[Definition]\nname = Beta Mod\ndescription = Second one\nversion = 2\n");
-    fs::create_directories(root / "mods" / "Beta" / "content");
+               "[Definition]\nname = Beta Mod\ndescription = Second one\nversion = 2\n"
+               "[Preset]\nname = Default Look\ncategory = Style\ndefault = 1\n"
+               "[Preset]\nname = Dark Look\ncategory = Style\n");
+    write_text(root / "mods" / "Beta" / "content" / "Actor" / "Pack" / "Link.sbactorpack", "beta-link");
     write_text(root / "mods" / "Alpha" / "rules.txt", "[Definition]\nname = \"Alpha\"\n");
     fs::create_directories(root / "mods" / "Alpha" / "aoc");
-    fs::create_directories(root / "mods" / "Gamma" / "content");
+    // Direct Actor/ layout without content/ wrapper:
+    write_text(root / "mods" / "Gamma" / "Actor" / "Pack" / "Link.sbactorpack", "gamma-link");
     write_text(root / "mods.ini", "; keep me\n[Enabled]\nBeta=1\nGone=1\n[Other]\nx=y\n");
 
     auto st = mods::load(root);
@@ -96,17 +99,30 @@ void test_mods(const fs::path& root) {
         expect(st.list[0].folder == "Alpha" && st.list[1].folder == "Beta", "alphabetical without [Order]");
         expect(st.list[0].name == "Alpha", "quoted name: " + st.list[0].name);
         expect(st.list[1].name == "Beta Mod" && st.list[1].version == "2", "rules name and version");
+        expect(st.list[1].presets.size() == 1 && st.list[1].presets[0].active == "Default Look", "default preset parsed");
         expect(st.list[2].name == "Gamma" && !st.list[2].has_rules, "no rules uses folder name");
         expect(!st.list[0].enabled && st.list[1].enabled && !st.list[2].enabled, "missing key is off");
-        expect(st.list[0].has_aoc && st.list[1].has_content, "content and aoc detected");
+        expect(st.list[0].has_aoc && st.list[1].has_content && st.list[2].has_content, "content and aoc detected");
     }
     expect(mods::enabled_count(st) == 1, "one enabled");
     expect(!st.has_order, "no order yet");
 
-    // Enable Gamma and move it first.
+    // Enable Gamma, change Beta's preset, and move Gamma first.
     std::vector<mods::Mod> reordered;
-    for (auto& m : st.list) if (m.folder == "Gamma") { m.enabled = true; reordered.push_back(m); }
-    for (auto& m : st.list) if (m.folder != "Gamma") reordered.push_back(m);
+    for (auto& m : st.list) {
+        if (m.folder == "Gamma") {
+            m.enabled = true;
+            reordered.push_back(m);
+        }
+    }
+    for (auto& m : st.list) {
+        if (m.folder != "Gamma") {
+            if (m.folder == "Beta" && !m.presets.empty()) {
+                m.presets[0].active = "Dark Look";
+            }
+            reordered.push_back(m);
+        }
+    }
     st.list = reordered;
     std::string err;
     expect(mods::save(root, st, true, err), "save works: " + err);
@@ -114,14 +130,118 @@ void test_mods(const fs::path& root) {
     expect(ini.find("order=Gamma,Alpha,Beta") != std::string::npos, "order written");
     expect(ini.find("Gone=1") != std::string::npos, "keys for missing folders kept");
     expect(ini.find("[Other]") != std::string::npos && ini.find("x=y") != std::string::npos, "other sections kept");
+    expect(ini.find("Beta:Style=Dark Look") != std::string::npos, "preset persisted");
 
     auto again = mods::load(root);
     expect(again.has_order, "order read back");
     if (again.list.size() == 3) {
         expect(again.list[0].folder == "Gamma" && again.list[0].enabled, "Gamma first and on");
         expect(again.list[2].folder == "Beta" && again.list[2].enabled, "Beta last and on");
+        expect(again.list[2].presets.size() == 1 && again.list[2].presets[0].active == "Dark Look", "preset read back");
+        // Beta is after Gamma and both touch Actor/Pack/Link.sbactorpack -> Beta overrides Gamma
+        expect(again.list[2].overrides_mods.size() == 1 && again.list[2].overrides_mods[0] == "Gamma", "Beta overrides Gamma");
+        expect(again.list[0].overridden_by_mods.size() == 1 && again.list[0].overridden_by_mods[0] == "Beta Mod", "Gamma overridden by Beta Mod");
     }
+
+    // Test installing a folder via mods::install_mod
+    fs::path ext_mod = root / "external_source" / "CoolPack";
+    write_text(ext_mod / "rules.txt", "[Definition]\nname = Cool Pack\nversion = 5\n");
+    write_text(ext_mod / "Actor" / "Pack" / "Horse.sbactorpack", "horse-mod");
+    std::string installed_folder;
+    expect(mods::install_mod(root, ext_mod, installed_folder, err), "install_mod folder works: " + err);
+    expect(installed_folder == "CoolPack", "installed folder name");
+    auto after_install = mods::load(root);
+    expect(after_install.list.size() == 4, "four mods after install");
+
     fs::remove_all(root);
+}
+
+
+void test_sha1_and_dumps(const fs::path& root) {
+    expect(gameinfo::sha1_bytes("abc", 3) == "a9993e364706816aba3e25717850c26c9cd0d89d", "sha1 of abc");
+
+    fs::remove_all(root);
+    // Simulate a Dumpling / wiiuu parent folder with separate Base (v0), Update (v208), and DLC (v80)
+    fs::path base = root / "wiiuu" / "BotW_Base";
+    fs::path upd = root / "wiiuu" / "BotW_Update_v208";
+    fs::path dlc = root / "wiiuu" / "BotW_DLC_v80";
+
+    write_text(base / "meta" / "meta.xml",
+               "<menu><title_id>00050000101C9400</title_id><title_version>0</title_version>"
+               "<longname_en>The Legend of Zelda&#xA;Breath of the Wild</longname_en></menu>");
+    write_text(base / "code" / "U-King.rpx", "base_v0_rpx");
+    write_text(base / "content" / "Pack" / "Bootup.pack", "base_bootup");
+    write_text(base / "content" / "Actor" / "Link.sbactorpack", "base_link");
+
+    write_text(upd / "meta" / "meta.xml",
+               "<menu><title_id>0005000E101C9400</title_id><title_version>208</title_version>"
+               "<longname_en>The Legend of Zelda&#xA;Breath of the Wild</longname_en></menu>");
+    write_text(upd / "code" / "U-King.rpx", "update_v208_rpx");
+    write_text(upd / "content" / "Pack" / "Bootup.pack", "updated_bootup_v208");
+
+    write_text(dlc / "meta" / "meta.xml",
+               "<menu><title_id>0005000C101C9400</title_id><title_version>80</title_version></menu>");
+    write_text(dlc / "content" / "0010" / "Pack" / "AocMainField.pack", "dlc_aoc_mainfield");
+
+    auto layout = gameinfo::discover_dumps(root / "wiiuu");
+    expect(layout.needs_merge, "separate dumps need merge");
+    expect(layout.ready(), "separate base + update ready to merge");
+    expect(layout.base_folder == base, "found base folder");
+    expect(layout.update_folder == upd, "found update folder");
+    expect(layout.dlc_folder == dlc, "found dlc folder");
+
+    fs::path merged = root / "merged_game";
+    std::string err;
+    expect(gameinfo::merge_dumps(layout.base_folder, layout.update_folder, layout.dlc_folder, merged, err),
+           "merge_dumps succeeds: " + err);
+
+    // Base files must remain untouched while merged has Update overlay + Base files + DLC!
+    expect(read_text(base / "code" / "U-King.rpx") == "base_v0_rpx", "base rpx untouched");
+    expect(read_text(merged / "code" / "U-King.rpx") == "update_v208_rpx", "merged rpx from update");
+    expect(read_text(merged / "content" / "Pack" / "Bootup.pack") == "updated_bootup_v208", "merged bootup from update");
+    expect(read_text(merged / "content" / "Actor" / "Link.sbactorpack") == "base_link", "merged actor from base");
+    expect(read_text(merged / "aoc" / "0010" / "Pack" / "AocMainField.pack") == "dlc_aoc_mainfield", "merged dlc aoc");
+
+    auto minfo = gameinfo::read(merged);
+    expect(minfo.has_rpx && minfo.has_content && minfo.has_meta && minfo.has_dlc, "merged game info complete");
+    expect(minfo.title_version == 208, "merged version is 208");
+
+    fs::remove_all(root);
+}
+
+void test_setup_wizard(const fs::path& root) {
+    setupwizard::BuildProgress prog;
+    expect(setupwizard::parse_progress_line("[recomp 1/4] Decompressing & parsing U-King.rpx...", prog), "parse recomp 1/4");
+    expect(prog.stage == setupwizard::BuildStage::RecompileWiiUToCpp, "stage is RecompileWiiUToCpp");
+    expect(prog.recompile_step == 1 && prog.recompile_total == 4, "step 1/4");
+
+    expect(setupwizard::parse_progress_line("[recomp 3/4] Generating C++ shard 42/258 (16%) [fn_020c0000.cpp]...", prog), "parse recomp 3/4");
+    expect(prog.sub_done == 42 && prog.sub_total == 258, "shard 42/258");
+    expect(prog.current_item == "fn_020c0000.cpp", "current item fn_020c0000.cpp");
+    expect(prog.phase_text.find("shard 42 / 258, 16%") != std::string::npos, "phase text has shard 42 / 258, 16%");
+
+    expect(setupwizard::parse_progress_line("[recomp 4/4] Writing dispatch table & HLE stubs (100%)", prog), "parse recomp 4/4");
+    expect(prog.stage_percent == 100, "recomp 4/4 stage 100%");
+
+    expect(setupwizard::parse_progress_line("[412/1267] Building CXX object CMakeFiles/BotWRecomp.dir/generated/fn_02340000.cpp.obj", prog), "parse ninja [412/1267]");
+    expect(prog.stage == setupwizard::BuildStage::CompileCppToExe, "stage is CompileCppToExe");
+    expect(prog.sub_done == 412 && prog.sub_total == 1267, "412/1267");
+    expect(prog.stage_percent == 32, "stage pct 32%");
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    write_text(root / "settings.ini", "# comment\nvolume=80\nscale=1\n");
+    setupwizard::GamePrefs prefs;
+    prefs.scale = 2;
+    prefs.fps = 60;
+    prefs.layout = 1;
+    prefs.gamepad_view = true;
+    prefs.gyro = false;
+    expect(setupwizard::write_game_prefs(root, prefs), "write_game_prefs");
+    auto r = setupwizard::read_game_prefs(root);
+    expect(r.scale == 2 && r.fps == 60 && r.layout == 1 && r.gamepad_view && !r.gyro, "read_game_prefs round-trip");
+    expect(read_text(root / "settings.ini").find("volume=80") != std::string::npos, "preserved volume=80");
+    fs::remove_all(root, ec);
 }
 
 }  // namespace
@@ -130,6 +250,8 @@ int main() {
     test_meta();
     test_tga();
     test_mods(fs::temp_directory_path() / "launcher_data_test");
+    test_sha1_and_dumps(fs::temp_directory_path() / "launcher_dump_test");
+    test_setup_wizard(fs::temp_directory_path() / "launcher_setup_test");
     if (g_fails) {
         std::cerr << g_fails << " failed\n";
         return 1;

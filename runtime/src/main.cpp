@@ -230,6 +230,22 @@ int main(int argc, char** argv) {
         fprintf(stderr, "game files required: %s --game <folder with code/ content/ meta/>\n", argv[0]);
         return 2;
     }
+    mods::set_patch_backend(mods::PatchBackend{
+        [](uint32_t addr) -> uint8_t {
+            mem::commit(addr, 1, false);
+            return mem::r8(addr);
+        },
+        [](uint32_t addr, uint8_t val) {
+            mem::commit(addr, 1, true);
+            mem::w8(addr, val);
+        },
+        [](uint32_t addr) { return dispatch::is_function_entry(addr); },
+        [](uint32_t addr) { dispatch::override_fn_nop(addr); },
+        [](uint32_t addr, uint32_t imm) { dispatch::override_fn_ret_imm(addr, imm); },
+        [](uint32_t addr, uint32_t target) { return dispatch::redirect_fn(addr, target); },
+        []() { dispatch::restore_fn_overrides(); },
+    });
+    mods::apply_patches();
     os::init();
     if (g_render_scale <= 0) {  // render at the display's native resolution, so fullscreen is 1:1
         int dw, dh;

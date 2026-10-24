@@ -14,6 +14,8 @@ void tab(int dir);      // previous / next tab (controller L1 / R1, keyboard Tab
 void select_tab(int i); // touch / mouse: jump to a tab
 void change(int dir);   // left / right on the selected row
 void activate();        // confirm button
+void reorder_mod(int delta);  // U/D or controller X/Y in Mods tab: move selected mod up (-1) or down (+1)
+void reload_mods();           // R in Mods tab: apply & reload mod overlay immediately
 
 struct Row {
     std::string label, value;

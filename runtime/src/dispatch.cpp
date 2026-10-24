@@ -53,8 +53,33 @@ struct CacheEntry {
     GuestFn fn;
 };
 thread_local CacheEntry t_cache[1024];
+thread_local uint32_t t_current_dispatch_addr = 0;
+
+struct SavedFnOverride {
+    uint32_t idx = 0;
+    GuestFn orig_fn = nullptr;
+    uint32_t orig_rva = 0;
+};
+std::vector<SavedFnOverride> g_saved_fn_overrides;
+std::unordered_map<uint32_t, uint32_t> g_fn_ret_imms;
+
+void stub_fn_nop(PPCContext* /*c*/) {}
+void stub_fn_ret_0(PPCContext* c) { c->r[3] = 0; }
+void stub_fn_ret_1(PPCContext* c) { c->r[3] = 1; }
+void stub_fn_ret_minus1(PPCContext* c) { c->r[3] = 0xFFFFFFFFu; }
+void stub_fn_ret_imm(PPCContext* c) {
+    std::shared_lock<std::shared_mutex> l(g_lock);
+    auto it = g_fn_ret_imms.find(t_current_dispatch_addr);
+    c->r[3] = (it != g_fn_ret_imms.end()) ? it->second : 0u;
+}
 
 __attribute__((noinline)) GuestFn lookup_slow(uint32_t addr) {
+    t_current_dispatch_addr = addr;
+    uint32_t off = addr - mem::kText;
+    if (g_text_table && off < g_text_span) {
+        GuestFn fn = g_text_table[off >> 2];
+        if (fn) return fn;
+    }
     if (addr - mem::kThunkBase < mem::kThunkSize) return g_thunks[(addr - mem::kThunkBase) >> 2];
     if (addr - kStubBase < kStubSize) {
         GuestFn fn = g_stub_table[(addr - kStubBase) >> 2];
@@ -106,11 +131,14 @@ void init() {
 }
 
 GuestFn lookup(uint32_t addr) {
+    t_current_dispatch_addr = addr;
     uint32_t off = addr - mem::kText;
 #if defined(_WIN32)
     if (__builtin_expect(off < kMaxTextSpan, 1)) {
         uint32_t rva = g_text_rva[off >> 2];
-        return rva ? (GuestFn)(__ImageBase + rva) : nullptr;
+        if (__builtin_expect(rva != 0, 1)) return (GuestFn)(__ImageBase + rva);
+        if (g_text_table && off < g_text_span && g_text_table[off >> 2]) return g_text_table[off >> 2];
+        return nullptr;
     }
 #else
     if (__builtin_expect(off < g_text_span, 1)) return g_text_table[off >> 2];
@@ -169,6 +197,79 @@ void add_import_stub(uint32_t addr, GuestFn fn, const char* lib, const char* nam
     g_stub_names[addr] = key(lib, name);
 }
 
+static void save_and_set_fn_override_locked(uint32_t idx, GuestFn new_fn) {
+    bool already_saved = false;
+    for (const auto& s : g_saved_fn_overrides) {
+        if (s.idx == idx) {
+            already_saved = true;
+            break;
+        }
+    }
+    if (!already_saved) {
+        SavedFnOverride sv;
+        sv.idx = idx;
+        sv.orig_fn = g_text_table[idx];
+#if defined(_WIN32)
+        if ((idx << 2) < kMaxTextSpan) sv.orig_rva = g_text_rva[idx];
+#endif
+        g_saved_fn_overrides.push_back(sv);
+    }
+    g_text_table[idx] = new_fn;
+#if defined(_WIN32)
+    if ((idx << 2) < kMaxTextSpan) {
+        uintptr_t diff = (uintptr_t)new_fn - (uintptr_t)__ImageBase;
+        g_text_rva[idx] = (new_fn && diff <= 0xFFFFFFFFu) ? (uint32_t)diff : 0u;
+    }
+#endif
+}
+
+bool is_function_entry(uint32_t addr) {
+    if (!g_text_table || (addr & 3) != 0) return false;
+    uint32_t off = addr - mem::kText;
+    if (off >= g_text_span) return false;
+    return g_text_table[off >> 2] != nullptr;
+}
+
+void override_fn_nop(uint32_t addr) {
+    if (!is_function_entry(addr)) return;
+    std::unique_lock<std::shared_mutex> l(g_lock);
+    save_and_set_fn_override_locked((addr - mem::kText) >> 2, stub_fn_nop);
+}
+
+void override_fn_ret_imm(uint32_t addr, uint32_t imm) {
+    if (!is_function_entry(addr)) return;
+    std::unique_lock<std::shared_mutex> l(g_lock);
+    GuestFn fn = stub_fn_ret_imm;
+    if (imm == 0) fn = stub_fn_ret_0;
+    else if (imm == 1) fn = stub_fn_ret_1;
+    else if (imm == 0xFFFFFFFFu) fn = stub_fn_ret_minus1;
+    else g_fn_ret_imms[addr] = imm;
+    save_and_set_fn_override_locked((addr - mem::kText) >> 2, fn);
+}
+
+bool redirect_fn(uint32_t addr, uint32_t target) {
+    if (!is_function_entry(addr)) return false;
+    GuestFn target_fn = lookup(target);
+    if (!target_fn) return false;
+    std::unique_lock<std::shared_mutex> l(g_lock);
+    save_and_set_fn_override_locked((addr - mem::kText) >> 2, target_fn);
+    return true;
+}
+
+void restore_fn_overrides() {
+    std::unique_lock<std::shared_mutex> l(g_lock);
+    if (g_text_table) {
+        for (auto it = g_saved_fn_overrides.rbegin(); it != g_saved_fn_overrides.rend(); ++it) {
+            g_text_table[it->idx] = it->orig_fn;
+#if defined(_WIN32)
+            if ((it->idx << 2) < kMaxTextSpan) g_text_rva[it->idx] = it->orig_rva;
+#endif
+        }
+    }
+    g_saved_fn_overrides.clear();
+    g_fn_ret_imms.clear();
+}
+
 static void trap_unimplemented_thunk(PPCContext* c) {
     rt_trap(c, c->lr, "call to an unimplemented dynamically-loaded export (see thunk name above)");
 }
@@ -222,6 +323,7 @@ static __attribute__((noinline)) void rt_call_slow(PPCContext* c, uint32_t targe
 }
 
 extern "C" void rt_call(PPCContext* c, uint32_t target) {
+    t_current_dispatch_addr = target;
     uint32_t off = target - mem::kText;
 #if defined(_WIN32)
     if (__builtin_expect(off < kMaxTextSpan, 1)) {

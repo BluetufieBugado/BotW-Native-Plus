@@ -391,6 +391,12 @@ static Kind kind_of(HWND b) {
 bool is_button(HWND b) { return b && GetPropW(b, kKind) != nullptr; }
 bool is_check(HWND b) { return is_button(b) && kind_of(b) == Kind::Check; }
 
+void set_button_kind(HWND b, Kind kind) {
+    if (!b) return;
+    SetPropW(b, kKind, reinterpret_cast<HANDLE>(static_cast<INT_PTR>(static_cast<int>(kind) + 1)));
+    InvalidateRect(b, nullptr, FALSE);
+}
+
 void set_checked(HWND b, bool on) {
     if (on) SetPropW(b, kCheck, reinterpret_cast<HANDLE>(1));
     else RemovePropW(b, kCheck);

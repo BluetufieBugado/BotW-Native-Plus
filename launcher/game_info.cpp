@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 
@@ -10,7 +12,9 @@ namespace gameinfo {
 
 namespace {
 
-bool read_file(const std::filesystem::path& p, std::vector<uint8_t>& out, size_t cap) {
+namespace fs = std::filesystem;
+
+bool read_file(const fs::path& p, std::vector<uint8_t>& out, size_t cap) {
     std::ifstream in(p, std::ios::binary);
     if (!in) return false;
     in.seekg(0, std::ios::end);
@@ -98,7 +102,129 @@ std::string trim(const std::string& s) {
     return s.substr(a, b - a);
 }
 
+std::string lower_ascii(std::string s) {
+    for (char& c : s)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return s;
+}
+
+struct Sha1Ctx {
+    uint32_t h[5] = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u};
+    uint64_t total = 0;
+    uint8_t buf[64] = {};
+    size_t buf_len = 0;
+
+    static uint32_t rol(uint32_t x, int n) { return (x << n) | (x >> (32 - n)); }
+
+    void block(const uint8_t* p) {
+        uint32_t w[80];
+        for (int i = 0; i < 16; i++) {
+            w[i] = (static_cast<uint32_t>(p[i * 4 + 0]) << 24) |
+                   (static_cast<uint32_t>(p[i * 4 + 1]) << 16) |
+                   (static_cast<uint32_t>(p[i * 4 + 2]) << 8) |
+                   static_cast<uint32_t>(p[i * 4 + 3]);
+        }
+        for (int i = 16; i < 80; i++) w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+        for (int i = 0; i < 80; i++) {
+            uint32_t f = 0, k = 0;
+            if (i < 20) {
+                f = (b & c) | ((~b) & d);
+                k = 0x5A827999u;
+            } else if (i < 40) {
+                f = b ^ c ^ d;
+                k = 0x6ED9EBA1u;
+            } else if (i < 60) {
+                f = (b & c) | (b & d) | (c & d);
+                k = 0x8F1BBCDCu;
+            } else {
+                f = b ^ c ^ d;
+                k = 0xCA62C1D6u;
+            }
+            uint32_t t = rol(a, 5) + f + e + k + w[i];
+            e = d;
+            d = c;
+            c = rol(b, 30);
+            b = a;
+            a = t;
+        }
+        h[0] += a;
+        h[1] += b;
+        h[2] += c;
+        h[3] += d;
+        h[4] += e;
+    }
+
+    void update(const uint8_t* data, size_t len) {
+        total += len;
+        while (len > 0) {
+            size_t take = std::min(len, sizeof(buf) - buf_len);
+            std::memcpy(buf + buf_len, data, take);
+            buf_len += take;
+            data += take;
+            len -= take;
+            if (buf_len == sizeof(buf)) {
+                block(buf);
+                buf_len = 0;
+            }
+        }
+    }
+
+    std::string final_hex() {
+        uint64_t bits = total * 8;
+        uint8_t pad = 0x80;
+        update(&pad, 1);
+        uint8_t zero = 0;
+        while (buf_len != 56) update(&zero, 1);
+        uint8_t len_be[8];
+        for (int i = 0; i < 8; i++) len_be[7 - i] = static_cast<uint8_t>(bits >> (i * 8));
+        update(len_be, 8);
+        char hex[41];
+        std::snprintf(hex, sizeof hex, "%08x%08x%08x%08x%08x", h[0], h[1], h[2], h[3], h[4]);
+        return hex;
+    }
+};
+
+bool has_dlc_pack(const fs::path& dir) {
+    std::error_code ec;
+    if (fs::is_regular_file(dir / "aoc" / "0010" / "Pack" / "AocMainField.pack", ec)) return true;
+    if (fs::is_regular_file(dir / "aoc" / "content" / "0010" / "Pack" / "AocMainField.pack", ec)) return true;
+    if (fs::is_regular_file(dir / "content" / "0010" / "Pack" / "AocMainField.pack", ec)) return true;
+    if (fs::is_regular_file(dir / "0010" / "Pack" / "AocMainField.pack", ec)) return true;
+    return false;
+}
+
+fs::path resolve_dlc_content_src(const fs::path& dlc_dir) {
+    std::error_code ec;
+    if (fs::is_directory(dlc_dir / "content" / "0010", ec)) return dlc_dir / "content";
+    if (fs::is_directory(dlc_dir / "0010", ec)) return dlc_dir;
+    if (fs::is_directory(dlc_dir / "aoc" / "0010", ec)) return dlc_dir / "aoc";
+    if (fs::is_directory(dlc_dir / "aoc" / "content" / "0010", ec)) return dlc_dir / "aoc" / "content";
+    if (fs::is_directory(dlc_dir / "content", ec)) return dlc_dir / "content";
+    return dlc_dir;
+}
+
 }  // namespace
+
+std::string sha1_bytes(const void* data, size_t len) {
+    Sha1Ctx ctx;
+    if (data && len > 0) ctx.update(static_cast<const uint8_t*>(data), len);
+    return ctx.final_hex();
+}
+
+std::string sha1_file(const fs::path& file_path) {
+    std::ifstream in(file_path, std::ios::binary);
+    if (!in) return {};
+    Sha1Ctx ctx;
+    std::vector<uint8_t> buf(64 * 1024);
+    while (in) {
+        in.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+        std::streamsize got = in.gcount();
+        if (got > 0) ctx.update(buf.data(), static_cast<size_t>(got));
+    }
+    if (in.bad()) return {};
+    return ctx.final_hex();
+}
 
 bool parse_meta(const std::string& xml, Info& out) {
     std::string v;
@@ -202,12 +328,14 @@ bool decode_tga(const std::vector<uint8_t>& f, Icon& out) {
     return true;
 }
 
-Info read(const std::filesystem::path& game) {
+Info read(const fs::path& game) {
     Info info;
     std::error_code ec;
-    if (game.empty() || !std::filesystem::is_directory(game, ec)) return info;
+    if (game.empty() || !fs::is_directory(game, ec)) return info;
     info.folder_exists = true;
-    info.has_rpx = std::filesystem::is_regular_file(game / "code" / "U-King.rpx", ec);
+    info.has_rpx = fs::is_regular_file(game / "code" / "U-King.rpx", ec);
+    info.has_content = fs::is_directory(game / "content", ec);
+    info.has_dlc = has_dlc_pack(game);
     std::vector<uint8_t> data;
     if (read_file(game / "meta" / "meta.xml", data, 1 << 20)) {
         std::string xml(data.begin(), data.end());
@@ -220,6 +348,8 @@ Info read(const std::filesystem::path& game) {
 
 std::string version_name(uint32_t v) {
     switch (v) {
+        case 0: return "v1.0.0";
+        case 80: return "DLC v3.0";
         case 208: return "v1.5.0";
         default: return "v" + std::to_string(v);
     }
@@ -232,6 +362,251 @@ std::string region_name(const std::string& id) {
     if (low == "101C9500") return "Europe";
     if (low == "101C9300") return "Japan";
     return {};
+}
+
+RpxVerify verify_rpx(const fs::path& game_or_rpx) {
+    RpxVerify v;
+    std::error_code ec;
+    fs::path rpx_path = game_or_rpx;
+    fs::path game_dir;
+    if (fs::is_directory(game_or_rpx, ec)) {
+        game_dir = game_or_rpx;
+        rpx_path = game_or_rpx / "code" / "U-King.rpx";
+    } else if (rpx_path.parent_path().filename() == "code") {
+        game_dir = rpx_path.parent_path().parent_path();
+    }
+    if (!fs::is_regular_file(rpx_path, ec)) {
+        v.summary = "code\\U-King.rpx not found.";
+        return v;
+    }
+    v.exists = true;
+    v.size = static_cast<uint64_t>(fs::file_size(rpx_path, ec));
+    v.sha1 = sha1_file(rpx_path);
+    v.hash_match = (v.sha1 == kUsaV208RpxSha1);
+
+    if (!game_dir.empty()) {
+        Info info = read(game_dir);
+        v.region = region_name(info.title_id);
+        v.title_version = info.title_version;
+        v.has_title_version = info.has_title_version;
+        v.meta_usa_v208 = (v.region == "USA" && info.has_title_version && info.title_version == kExpectedTitleVersion);
+    }
+
+    if (v.hash_match) {
+        v.summary = "Verified USA v1.5.0 (v208) U-King.rpx (SHA-1: " + v.sha1.substr(0, 12) + "...)";
+    } else if (!v.region.empty() && v.region != "USA") {
+        v.summary = v.region + " dump detected. BotW-Native requires the USA v1.5.0 (00050000101C9400, v208) dump.";
+    } else if (v.has_title_version && v.title_version < kExpectedTitleVersion) {
+        v.summary = "Unpatched base game (" + version_name(v.title_version) +
+                    ") detected. Select your v1.5.0 (v208) Update folder to merge.";
+    } else if (v.meta_usa_v208) {
+        v.summary = "USA v1.5.0 (v208) meta.xml detected (U-King.rpx SHA-1: " +
+                    (v.sha1.empty() ? std::string("none") : v.sha1.substr(0, 12) + "...") + ")";
+    } else {
+        v.summary = "U-King.rpx found (SHA-1: " + (v.sha1.empty() ? std::string("none") : v.sha1.substr(0, 12) + "...") + ")";
+    }
+    return v;
+}
+
+std::string DumpLayout::summary() const {
+    if (!merged_game.empty()) {
+        std::string s = "Ready: Merged USA v1.5.0 (v208) game folder";
+        if (!dlc_folder.empty() || base_info.has_dlc) s += " + DLC (v80)";
+        return s;
+    }
+    if (!base_folder.empty() && !update_folder.empty()) {
+        std::string s = "Ready to merge: Base Game + Update v1.5.0 (v208)";
+        if (!dlc_folder.empty()) s += " + DLC (v80)";
+        return s;
+    }
+    if (!base_folder.empty()) {
+        return "Base game found, but Update v1.5.0 (v208) folder is still needed.";
+    }
+    if (!update_folder.empty()) {
+        return "Update v1.5.0 (v208) found, but Base Game folder is still needed.";
+    }
+    return "No Breath of the Wild Wii U dump folders found yet.";
+}
+
+DumpLayout discover_dumps(const fs::path& root) {
+    DumpLayout out;
+    std::error_code ec;
+    if (root.empty() || !fs::is_directory(root, ec)) return out;
+
+    std::vector<fs::path> candidates;
+    auto should_skip_dir = [](const std::string& name_lower) {
+        return name_lower == "content" || name_lower == "code" || name_lower == "meta" ||
+               name_lower == "aoc" || name_lower == "0010" || name_lower == "shadercache" ||
+               name_lower == ".git" || name_lower == "generated" || name_lower == "build";
+    };
+
+    auto scan_dir = [&](auto& self, const fs::path& dir, int depth) -> void {
+        std::error_code dec;
+        bool is_cand = fs::is_regular_file(dir / "meta" / "meta.xml", dec) ||
+                       fs::is_regular_file(dir / "code" / "U-King.rpx", dec) ||
+                       fs::is_regular_file(dir / "content" / "0010" / "Pack" / "AocMainField.pack", dec) ||
+                       fs::is_regular_file(dir / "0010" / "Pack" / "AocMainField.pack", dec);
+        if (is_cand) candidates.push_back(dir);
+        if (depth >= 3) return;
+        for (fs::directory_iterator it(dir, dec); !dec && it != fs::directory_iterator(); it.increment(dec)) {
+            std::error_code sec;
+            if (!it->is_directory(sec) || it->is_symlink(sec)) continue;
+            std::string fname;
+            try {
+                fname = lower_ascii(it->path().filename().string());
+            } catch (...) {
+                continue;
+            }
+            if (should_skip_dir(fname)) continue;
+            self(self, it->path(), depth + 1);
+        }
+    };
+
+    scan_dir(scan_dir, root, 0);
+    // If `root` itself was a single base/update folder, also scan its parent directory (1 level) for sibling update/DLC dumps.
+    if (candidates.size() == 1 && candidates[0] == root && root.has_parent_path()) {
+        fs::path parent = root.parent_path();
+        for (fs::directory_iterator it(parent, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+            std::error_code sec;
+            if (!it->is_directory(sec) || it->path() == root) continue;
+            bool is_cand = fs::is_regular_file(it->path() / "meta" / "meta.xml", sec) ||
+                           fs::is_regular_file(it->path() / "code" / "U-King.rpx", sec) ||
+                           fs::is_regular_file(it->path() / "content" / "0010" / "Pack" / "AocMainField.pack", sec);
+            if (is_cand) candidates.push_back(it->path());
+        }
+    }
+
+    for (const fs::path& cand : candidates) {
+        Info info = read(cand);
+        std::string tid = info.title_id;
+        bool is_dlc = (tid.rfind("0005000C", 0) == 0) ||
+                      (!info.has_rpx && (fs::is_regular_file(cand / "content" / "0010" / "Pack" / "AocMainField.pack", ec) ||
+                                         fs::is_regular_file(cand / "0010" / "Pack" / "AocMainField.pack", ec)));
+        bool is_update = (tid.rfind("0005000E", 0) == 0);
+        bool is_base = (tid.rfind("00050000", 0) == 0);
+
+        if (is_dlc) {
+            if (out.dlc_folder.empty()) out.dlc_folder = cand;
+            continue;
+        }
+        if (is_update) {
+            if (out.update_folder.empty()) {
+                out.update_folder = cand;
+                out.update_info = info;
+            }
+            continue;
+        }
+        if (is_base || info.has_rpx) {
+            if (info.has_title_version && info.title_version == kExpectedTitleVersion && out.base_folder.empty()) {
+                out.base_folder = cand;
+                out.base_info = info;
+            } else if (out.base_folder.empty()) {
+                out.base_folder = cand;
+                out.base_info = info;
+            } else if (info.has_title_version && info.title_version == kExpectedTitleVersion && out.update_folder.empty()) {
+                out.update_folder = cand;
+                out.update_info = info;
+            }
+        }
+    }
+
+    if (!out.base_folder.empty()) {
+        if (out.base_info.has_dlc && out.dlc_folder.empty()) {
+            out.dlc_folder = out.base_folder / "aoc";
+        }
+        bool base_is_v208 = out.base_info.has_title_version && out.base_info.title_version == kExpectedTitleVersion;
+        if (base_is_v208 && out.update_folder.empty()) {
+            out.merged_game = out.base_folder;
+            out.needs_merge = false;
+        } else if (!out.update_folder.empty() && out.update_folder != out.base_folder) {
+            out.needs_merge = true;
+        }
+    }
+    return out;
+}
+
+bool merge_dumps(const fs::path& base_dir,
+                 const fs::path& update_dir,
+                 const fs::path& dlc_dir,
+                 const fs::path& target_game_dir,
+                 std::string& err,
+                 MergeProgressFn progress) {
+    std::error_code ec;
+    if (base_dir.empty() || !fs::is_directory(base_dir, ec)) {
+        err = "Base game folder does not exist.";
+        return false;
+    }
+    if (update_dir.empty() || !fs::is_directory(update_dir, ec)) {
+        err = "Update v1.5.0 (v208) folder does not exist.";
+        return false;
+    }
+    if (target_game_dir.empty()) {
+        err = "Target merged game folder path is empty.";
+        return false;
+    }
+
+    struct CopyItem {
+        fs::path src;
+        fs::path dst;
+        std::string phase;
+    };
+    std::vector<CopyItem> items;
+
+    auto collect_tree = [&](const fs::path& src_root, const fs::path& dst_root, const std::string& phase) {
+        std::error_code tec;
+        if (!fs::is_directory(src_root, tec)) return;
+        for (fs::recursive_directory_iterator it(src_root, fs::directory_options::skip_permission_denied, tec);
+             !tec && it != fs::recursive_directory_iterator(); it.increment(tec)) {
+            std::error_code sec;
+            if (!it->is_regular_file(sec)) continue;
+            fs::path rel = it->path().lexically_relative(src_root);
+            if (rel.empty()) continue;
+            items.push_back({it->path(), dst_root / rel, phase});
+        }
+    };
+
+    for (const char* sub : {"code", "content", "meta"}) {
+        collect_tree(base_dir / sub, target_game_dir / sub, "Linking Base Game files");
+    }
+    for (const char* sub : {"code", "content", "meta"}) {
+        collect_tree(update_dir / sub, target_game_dir / sub, "Applying Update v1.5.0 (v208)");
+    }
+    if (!dlc_dir.empty() && fs::is_directory(dlc_dir, ec)) {
+        fs::path dlc_src = resolve_dlc_content_src(dlc_dir);
+        collect_tree(dlc_src, target_game_dir / "aoc", "Linking DLC (v80) files");
+    }
+
+    if (items.empty()) {
+        err = "No game files found in Base or Update folders.";
+        return false;
+    }
+
+    int total = static_cast<int>(items.size());
+    for (int i = 0; i < total; i++) {
+        const CopyItem& item = items[i];
+        if (progress && (i == 0 || i + 1 == total || (i % 25) == 0)) {
+            progress(i + 1, total, item.phase);
+        }
+        fs::create_directories(item.dst.parent_path(), ec);
+        if (ec) {
+            err = "Could not create directory " + item.dst.parent_path().string();
+            return false;
+        }
+        // Always unlink destination first so overlaying Update over Base never mutates Base via hardlink.
+        fs::remove(item.dst, ec);
+        ec.clear();
+        fs::create_hard_link(item.src, item.dst, ec);
+        if (ec) {
+            ec.clear();
+            fs::copy_file(item.src, item.dst, fs::copy_options::overwrite_existing, ec);
+            if (ec) {
+                err = "Could not link or copy " + item.src.filename().string() + ": " + ec.message();
+                return false;
+            }
+        }
+    }
+    if (progress) progress(total, total, "Merged game folder ready");
+    return true;
 }
 
 }  // namespace gameinfo
