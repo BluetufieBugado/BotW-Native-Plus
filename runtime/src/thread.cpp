@@ -351,6 +351,20 @@ void maybe_preempt(GuestThread* me) {
     }
 }
 
+void maybe_preempt_sync(GuestThread* me) {
+    if (!me || me->prio < 18 || t_exec_depth == 0 || t_exec_core < 0) return;
+    auto& cs = g_exec[t_exec_core];
+    bool demand = (cs.min_waiter_prio.load(std::memory_order_acquire) <= 17);
+    if (!demand) {
+        uint64_t until = cs.wake_high_until_ns.load(std::memory_order_acquire);
+        if (until != 0 && sched_now_ns() < until) demand = true;
+    }
+    if (demand) {
+        exec_yield();
+        exec_resume();
+    }
+}
+
 bool exec_yield() {
     if (t_exec_depth == 0) return false;
     int core = t_exec_core;

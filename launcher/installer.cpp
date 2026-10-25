@@ -169,23 +169,37 @@ void run_install() {
     fs::create_directories(dst, ec);
 
     // Copy BotWLauncher.exe, SDL3.dll, gamecontrollerdb.txt, and BotWRecomp.exe if present alongside installer
-    const char* files[] = {
-        "BotWLauncher.exe",
-        "BotWRecomp.exe",
-        "SDL3.dll",
-        "libwinpthread-1.dll",
-        "gamecontrollerdb.txt",
-    };
+    std::vector<fs::path> files;
+    for (const char* f : {"BotWLauncher.exe", "BotWLauncherClassic.exe", "BotWRecomp.exe", "gamecontrollerdb.txt"})
+        files.push_back(src / f);
+    // Every DLL shipped beside the installer (SDL3 and the compiler runtime the game needs).
+    for (auto it = fs::directory_iterator(src, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        auto ext = it->path().extension().wstring();
+        if (_wcsicmp(ext.c_str(), L".dll") == 0) files.push_back(it->path());
+    }
+    std::wstring failed;
+    if (!fs::is_directory(dst, ec)) failed += L"  " + dst.wstring() + L" (could not create the folder)\n";
     int idx = 0;
-    for (const char* f : files) {
+    for (const fs::path& s : files) {
         idx++;
-        fs::path s = src / f;
-        fs::path d = dst / f;
-        if (fs::is_regular_file(s, ec)) {
-            set_progress(15 + idx * 12, L"Installing " + std::wstring(s.filename().wstring()) + L"...");
-            if (fs::equivalent(s, d, ec)) continue;
-            fs::copy_file(s, d, fs::copy_options::overwrite_existing, ec);
-        }
+        fs::path d = dst / s.filename();
+        if (!fs::is_regular_file(s, ec)) continue;
+        set_progress(15 + idx * 60 / (int)files.size(), L"Installing " + s.filename().wstring() + L"...");
+        if (fs::equivalent(s, d, ec)) continue;
+        std::error_code cec;
+        if (!fs::copy_file(s, d, fs::copy_options::overwrite_existing, cec) || cec)
+            failed += L"  " + s.filename().wstring() + L"\n";
+    }
+    if (!failed.empty()) {
+        set_progress(0, L"Installation failed.");
+        MessageBoxW(g_ins.hwnd, (L"These files could not be copied:\n" + failed +
+            L"\nChoose a folder you can write to (not under Program Files), and close the game if it is running.").c_str(),
+            kTitle, MB_OK | MB_ICONERROR);
+        g_ins.installing = false;
+        EnableWindow(g_ins.install_b, TRUE);
+        EnableWindow(g_ins.dir_b, TRUE);
+        EnableWindow(g_ins.dir_e, TRUE);
+        return;
     }
 
     // Copy tools/ and cafe/ if present alongside installer and not already in dst

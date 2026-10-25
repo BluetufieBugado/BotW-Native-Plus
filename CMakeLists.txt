@@ -11,6 +11,49 @@ project(BotWRecomp
   DESCRIPTION "Breath of the Wild recompiled for Windows and Linux (Vulkan)"
   LANGUAGES C CXX)
 
+# Build speed helpers, both optional. ccache only helps rebuilds (a first build is always a
+# cache miss), so it is used when it is installed and otherwise ignored.
+option(BOTW_USE_CCACHE "Use ccache when it is installed" ON)
+if(BOTW_USE_CCACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+  find_program(BOTW_CCACHE_PROGRAM ccache)
+  if(BOTW_CCACHE_PROGRAM)
+    set(CMAKE_C_COMPILER_LAUNCHER ${BOTW_CCACHE_PROGRAM})
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${BOTW_CCACHE_PROGRAM})
+    message(STATUS "Using ccache: ${BOTW_CCACHE_PROGRAM}")
+  endif()
+endif()
+# Link with lld when asked and the compiler accepts it; falls back to the default linker.
+option(BOTW_USE_LLD "Link with lld if the compiler supports -fuse-ld=lld" OFF)
+if(BOTW_USE_LLD AND NOT MSVC)
+  include(CheckLinkerFlag)
+  check_linker_flag(CXX "-fuse-ld=lld" BOTW_HAVE_LLD)
+  if(BOTW_HAVE_LLD)
+    add_link_options(-fuse-ld=lld)
+  endif()
+endif()
+
+# Keep local folder names out of shipped binaries: source and build paths in __FILE__ and
+# debug info are rewritten to relative ones. Each flag is used only if the compiler accepts it.
+if(NOT MSVC)
+  include(CheckCXXCompilerFlag)
+  # GCC applies the last matching map, so the (often nested) build folder comes second.
+  foreach(_botw_map_dir "${CMAKE_SOURCE_DIR}" "${CMAKE_BINARY_DIR}")
+    file(TO_CMAKE_PATH "${_botw_map_dir}" _botw_map_dir)
+    if(_botw_map_dir STREQUAL "${CMAKE_BINARY_DIR}" AND NOT _botw_map_dir STREQUAL "${CMAKE_SOURCE_DIR}")
+      set(_botw_map_to "build")
+    else()
+      set(_botw_map_to ".")
+    endif()
+    foreach(_botw_map_kind file macro)
+      string(MAKE_C_IDENTIFIER "BOTW_HAVE_${_botw_map_kind}_PREFIX_MAP" _botw_map_var)
+      check_cxx_compiler_flag("-f${_botw_map_kind}-prefix-map=/a=b" ${_botw_map_var})
+      if(${_botw_map_var})
+        add_compile_options("-f${_botw_map_kind}-prefix-map=${_botw_map_dir}=${_botw_map_to}")
+      endif()
+    endforeach()
+  endforeach()
+endif()
+
 if(APPLE)
   enable_language(OBJC)
   enable_language(OBJCXX)
@@ -117,13 +160,15 @@ if(NOT GUEST_SOURCES)
   set(GUEST_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/guest_stub.cpp)
   message(STATUS "generated/ is empty: linking a guest stub (graphics init only; the game will not run)")
 endif()
+# Optimisation level for the recompiled game code (the bulk of the build time).
+set(BOTW_GUEST_OPT "-O2" CACHE STRING "Compiler optimisation flag for generated/ game code")
 add_library(guest OBJECT ${GUEST_SOURCES})
 target_include_directories(guest PRIVATE runtime/include generated)
 if(APPLE)
   target_compile_options(guest PRIVATE -O2 -gline-tables-only -w -fwrapv -fno-strict-aliasing -mcpu=apple-m1
     -ffp-contract=off)
 else()
-  target_compile_options(guest PRIVATE -O2 -g1 -w -fwrapv -fno-strict-aliasing -ffp-contract=off)
+  target_compile_options(guest PRIVATE ${BOTW_GUEST_OPT} -g1 -w -fwrapv -fno-strict-aliasing -ffp-contract=off)
 endif()
 file(GLOB BIG_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/generated/big_*.cpp)
 file(GLOB HUGE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/generated/huge_*.cpp)
@@ -236,8 +281,13 @@ endif()
 # SDL_AddGamepadMappingsFromFile reads it at startup. The compile path is the
 # fallback when the process is not started from the build directory.
 set(_botw_controller_db "${CMAKE_SOURCE_DIR}/runtime/gamecontrollerdb.txt")
-file(TO_CMAKE_PATH "${_botw_controller_db}" _botw_controller_db_fwd)
-target_compile_definitions(BotWRecomp PRIVATE "BOTW_GAMECONTROLLER_DB=\"${_botw_controller_db_fwd}\"")
+# The compiled-in fallback path is for development runs only, so release builds do not carry
+# the local source folder.
+option(BOTW_EMBED_SOURCE_PATHS "Compile in the source path of gamecontrollerdb.txt as a fallback" OFF)
+if(BOTW_EMBED_SOURCE_PATHS)
+  file(TO_CMAKE_PATH "${_botw_controller_db}" _botw_controller_db_fwd)
+  target_compile_definitions(BotWRecomp PRIVATE "BOTW_GAMECONTROLLER_DB=\"${_botw_controller_db_fwd}\"")
+endif()
 add_custom_command(TARGET BotWRecomp POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${_botw_controller_db}" "$<TARGET_FILE_DIR:BotWRecomp>/gamecontrollerdb.txt"
@@ -317,8 +367,18 @@ if(WIN32)
   set(_botw_manifest "${CMAKE_SOURCE_DIR}/launcher/app.manifest")
   file(TO_CMAKE_PATH "${_botw_manifest}" _botw_manifest_cmake)
   file(WRITE "${CMAKE_BINARY_DIR}/botw_launcher_manifest.rc" "1 24 \"${_botw_manifest_cmake}\"\n")
+  # BotWLauncher: guided first-run setup, then Play / Mods / Settings.
   add_executable(BotWLauncher WIN32
     launcher/main.cpp
+    launcher/game_build.cpp
+    launcher/game_info.cpp
+    launcher/mods.cpp
+    launcher/setup_wizard.cpp
+    launcher/unzip.cpp
+    "${CMAKE_BINARY_DIR}/botw_launcher_manifest.rc")
+  # BotWLauncherClassic: the full launcher with controls, saves and the Setup Assistant.
+  add_executable(BotWLauncherClassic WIN32
+    launcher/classic_main.cpp
     launcher/game_info.cpp
     launcher/mods.cpp
     launcher/save_import.cpp
@@ -327,19 +387,21 @@ if(WIN32)
     launcher/unzip.cpp
     runtime/src/input/controls_file.cpp
     "${CMAKE_BINARY_DIR}/botw_launcher_manifest.rc")
-  target_include_directories(BotWLauncher PRIVATE launcher runtime/src)
-  target_compile_definitions(BotWLauncher PRIVATE SDL_MAIN_HANDLED UNICODE _UNICODE)
-  target_compile_options(BotWLauncher PRIVATE -O2 -Wall -Wno-unused-function -Wno-unused-variable -fwrapv)
-  if(TARGET SDL3::SDL3-shared)
-    target_link_libraries(BotWLauncher PRIVATE SDL3::SDL3-shared)
-  else()
-    target_link_libraries(BotWLauncher PRIVATE SDL3::SDL3)
-  endif()
-  target_link_libraries(BotWLauncher PRIVATE ZLIB::ZLIB comctl32 comdlg32 shell32 ole32 uuid uxtheme dwmapi gdiplus)
-  if(MINGW)
-    # GUI subsystem, but the entry point stays main() so SDL_main is not required.
-    target_link_options(BotWLauncher PRIVATE "-Wl,-e,mainCRTStartup")
-  endif()
+  foreach(_tgt BotWLauncher BotWLauncherClassic)
+    target_include_directories(${_tgt} PRIVATE launcher runtime/src)
+    target_compile_definitions(${_tgt} PRIVATE SDL_MAIN_HANDLED UNICODE _UNICODE)
+    target_compile_options(${_tgt} PRIVATE -O2 -Wall -Wno-unused-function -Wno-unused-variable -fwrapv)
+    if(TARGET SDL3::SDL3-shared)
+      target_link_libraries(${_tgt} PRIVATE SDL3::SDL3-shared)
+    else()
+      target_link_libraries(${_tgt} PRIVATE SDL3::SDL3)
+    endif()
+    target_link_libraries(${_tgt} PRIVATE ZLIB::ZLIB comctl32 comdlg32 shell32 ole32 uuid uxtheme dwmapi gdiplus)
+    if(MINGW)
+      # GUI subsystem, but the entry point stays main() so SDL_main is not required.
+      target_link_options(${_tgt} PRIVATE "-Wl,-e,mainCRTStartup")
+    endif()
+  endforeach()
   file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/BotWLauncher.cmd" CONTENT
     "@echo off\r\nset \"PATH=C:\\msys64\\ucrt64\\bin;%PATH%\"\r\nstart \"\" \"%~dp0BotWLauncher.exe\"\r\n")
   message(STATUS "BotWLauncher: Windows launcher (BotWLauncher.exe)")
@@ -372,3 +434,29 @@ if(BOTW_BUILD_TESTS)
   enable_testing()
   add_test(NAME mods COMMAND BotWModTests)
 endif()
+
+# Release package: `cmake --build <build> --target botw_package` (or
+# `cmake --install <build> --prefix <dir> --strip`) copies the shipped programs, stripped of
+# debug info, plus gamecontrollerdb.txt and the non-system DLLs they need, into one folder.
+set(BOTW_PACKAGE_DIR "${CMAKE_BINARY_DIR}/package" CACHE PATH "Output folder for the botw_package target")
+set(_botw_ship BotWRecomp)
+if(WIN32)
+  list(APPEND _botw_ship BotWLauncher BotWLauncherClassic BotWNativeSetup)
+endif()
+if(WIN32 OR (UNIX AND NOT APPLE))
+  install(TARGETS ${_botw_ship}
+    RUNTIME_DEPENDENCIES
+      PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-" "^vulkan-1" "^libvulkan"
+      POST_EXCLUDE_REGEXES ".*[Ss]ystem32.*" "^/lib" "^/usr/lib"
+      DIRECTORIES $ENV{PATH}
+    RUNTIME DESTINATION .
+    LIBRARY DESTINATION .)
+else()
+  install(TARGETS ${_botw_ship} RUNTIME DESTINATION . BUNDLE DESTINATION .)
+endif()
+install(FILES "${CMAKE_SOURCE_DIR}/runtime/gamecontrollerdb.txt" DESTINATION .)
+add_custom_target(botw_package
+  COMMAND ${CMAKE_COMMAND} --install "${CMAKE_BINARY_DIR}" --prefix "${BOTW_PACKAGE_DIR}" --strip
+  DEPENDS ${_botw_ship}
+  COMMENT "Packaging stripped release into ${BOTW_PACKAGE_DIR}"
+  VERBATIM)

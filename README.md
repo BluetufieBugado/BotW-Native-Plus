@@ -9,7 +9,7 @@ not a full-game release.
 
 ## What works
 
-Tested on an RTX 5060 laptop with 16 GB of RAM, from a USA v208 (1.5.0) game folder, at about
+Tested on a recent NVIDIA laptop GPU, from a USA v208 (1.5.0) game folder, at about
 60 fps:
 
 - the opening
@@ -21,6 +21,7 @@ Tested on an RTX 5060 laptop with 16 GB of RAM, from a USA v208 (1.5.0) game fol
 
 Not working or not confirmed yet:
 
+- Audio is not working yet.
 - Some effects, parts of the controller mapping, and some cutscene text are unconfirmed or
   incomplete.
 - Everything not listed above has not been checked. See [Known issues](#known-issues).
@@ -33,8 +34,8 @@ Not working or not confirmed yet:
 
 ## Requirements
 
-- Windows 10 or Windows 11, and a GPU with a Vulkan 1.1 driver. The verified machine is an
-  RTX 5060 laptop.
+- Windows 10 or Windows 11, and a GPU with a Vulkan 1.1 driver. The verified machine has
+  a recent NVIDIA laptop GPU.
 - [MSYS2](https://www.msys2.org/) with the **UCRT64** environment. The Cafe runtime uses
   pthreads, so the build is MinGW gcc. MSVC and clang-cl are not supported.
 - Your own legally obtained **Breath of the Wild for Wii U, USA, with update v208 (1.5.0)**,
@@ -87,11 +88,12 @@ anything. `generated/` is not in this repository.
 ```bash
 python tools/recompile.py /path/to/game/code/U-King.rpx generated
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build -j6
+cmake --build build -j12
 ```
 
-Use **`-j6`** on a 16 GB machine. Compiling `generated/` is the step that uses RAM. A higher
-job count can run the machine out of memory. The same `CMakeLists.txt` is what
+Each compile job on `generated/` peaks at about 0.5 GB of RAM. A 16 GB machine can run
+`-j12`. Allow roughly (RAM in GB − 2) / 0.75 jobs, and no more jobs than you have CPU threads.
+If `ccache` is on PATH, rebuilds use it automatically. The same `CMakeLists.txt` is what
 `.github/workflows/windows.yml` configures. Vulkan is the only graphics backend on Windows.
 
 ## Run
@@ -149,6 +151,7 @@ centered, and `--display` does not apply. Vulkan renderer only.
 - **First-run shaders.** Pipelines compile on first use, so the first time through a scene
   hitches. Later runs use the cache under `%APPDATA%\BotWRecomp`.
 - **A few cutscenes stay at 30 fps** on purpose. Gameplay runs at about 60 fps.
+- **Audio** is not working yet.
 - **Effects, controller mapping, cutscene text.** Some effects, parts of the controller
   mapping, and some cutscene text are unconfirmed or incomplete.
 - **Coverage.** Only the areas listed under [What works](#what-works) were checked. A long

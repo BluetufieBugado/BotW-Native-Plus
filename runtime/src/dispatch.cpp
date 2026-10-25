@@ -289,6 +289,7 @@ uint32_t guest_call(PPCContext* c, uint32_t fn, std::initializer_list<uint32_t> 
     *c = saved;
     return r;
 }
+
 // ---- runtime entry points used by generated code -----------------------------------------------
 static __attribute__((noinline)) void rt_call_slow(PPCContext* c, uint32_t target) {
     GuestFn fn = lookup_slow(target);

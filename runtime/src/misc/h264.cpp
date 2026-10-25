@@ -684,7 +684,8 @@ HLE_EXPORT(h264, H264DECSetParam) {
             sess.outputPerFrame = valuePtr;
             break;
         case H264_PARAM_USER_MEMORY:
-            sess.userMemory = (valuePtr >= 0x10000000u) ? mem::r32(valuePtr) : valuePtr;
+            // value is void** (same as SetParam_USER_MEMORY): store the pointed-to pointer
+            sess.userMemory = valuePtr ? mem::r32(valuePtr) : 0;
             break;
         default:
             break;

@@ -1,7 +1,7 @@
 # Docs
 
-Windows is the platform this fork documents first. Build, run, controls, and the verified
-RTX 5060 result are in the [repository README](../README.md).
+Windows is the platform this fork documents first. Build, run, controls, and the verified result
+on a recent NVIDIA laptop GPU are in the [repository README](../README.md).
 
 | Document | What it is |
 | --- | --- |

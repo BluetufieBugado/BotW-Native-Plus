@@ -76,7 +76,14 @@ def main() -> None:
         run_demo_progress(sys.argv[2], stop_at)
         return
 
+    if len(sys.argv) != 3 or sys.argv[1] in ("-h", "--help"):
+        print("usage: recompile.py <path to code/U-King.rpx> <output folder, usually generated>",
+              file=sys.stderr)
+        sys.exit(2)
     rpx_path, out = sys.argv[1], sys.argv[2]
+    if not os.path.isfile(rpx_path):
+        print(f"recompile.py: U-King.rpx not found: {rpx_path}", file=sys.stderr)
+        sys.exit(2)
     os.makedirs(out, exist_ok=True)
     t0 = time.time()
     print("[recomp 1/4] Decompressing & parsing U-King.rpx...", flush=True)
