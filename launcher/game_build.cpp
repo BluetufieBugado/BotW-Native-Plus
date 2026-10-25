@@ -7,6 +7,7 @@
 #include <cctype>
 #include <fstream>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -166,6 +167,45 @@ static std::vector<std::string> pe_imports(const fs::path& file) {
     return out;
 }
 
+// The launcher loads the same MinGW runtime DLLs from its own folder, so
+// overwriting them in place fails with "Permission denied". Skip identical
+// files, and otherwise move the locked one aside first (Windows allows
+// renaming a DLL that is in use) and copy the new one in its place.
+static bool same_file_contents(const fs::path& a, const fs::path& b) {
+    std::error_code ec;
+    if (!fs::is_regular_file(b, ec)) return false;
+    const auto sa = fs::file_size(a, ec);
+    if (ec) return false;
+    const auto sb = fs::file_size(b, ec);
+    if (ec || sa != sb) return false;
+    std::ifstream fa(a, std::ios::binary), fb(b, std::ios::binary);
+    if (!fa || !fb) return false;
+    std::istreambuf_iterator<char> ia(fa), ib(fb), end;
+    return std::equal(ia, end, ib, end);
+}
+
+static bool copy_dll(const fs::path& src, const fs::path& dst, std::error_code& ec) {
+    ec.clear();
+    if (same_file_contents(src, dst)) return true;
+    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+    if (!ec) return true;
+    std::error_code ec2;
+    if (!fs::exists(dst, ec2)) return false;
+    // A previous .old may itself still be loaded, so fall back to numbered names.
+    for (int i = 0; i < 100; ++i) {
+        fs::path old = dst;
+        old += i == 0 ? std::string(".old") : ".old" + std::to_string(i);
+        fs::remove(old, ec2);
+        if (fs::exists(old, ec2)) continue;
+        fs::rename(dst, old, ec2);
+        if (ec2) return false;
+        ec.clear();
+        fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+        return !ec;
+    }
+    return false;
+}
+
 bool install_with_dlls(const fs::path& exe, const fs::path& dll_dir, const fs::path& dest, std::string& err,
                        std::function<void(const std::string&)> note) {
     std::error_code ec;
@@ -181,8 +221,7 @@ bool install_with_dlls(const fs::path& exe, const fs::path& dll_dir, const fs::p
             if (!seen.insert(low).second) continue;
             fs::path src = dll_dir / n;
             if (!is_file(src)) continue;  // system DLL
-            fs::copy_file(src, dest / n, fs::copy_options::overwrite_existing, ec);
-            if (ec) { err = "could not copy " + n + ": " + ec.message(); return false; }
+            if (!copy_dll(src, dest / n, ec)) { err = "could not copy " + n + ": " + ec.message(); return false; }
             note("copied " + n);
             todo.push_back(src);
         }
