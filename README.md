@@ -13,6 +13,7 @@ Tested on a recent NVIDIA laptop GPU, from a USA v208 (1.5.0) game folder, at ab
 60 fps:
 
 - the opening
+- audio
 - the title screen with the logo
 - loading a save
 - combat
@@ -20,8 +21,6 @@ Tested on a recent NVIDIA laptop GPU, from a USA v208 (1.5.0) game folder, at ab
 - Hateno Village, with NPCs and shops
 
 Not working or not confirmed yet:
-
-- Audio is not working yet.
 - Some effects, parts of the controller mapping, and some cutscene text are unconfirmed or
   incomplete.
 - Everything not listed above has not been checked. See [Known issues](#known-issues).
