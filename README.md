@@ -116,7 +116,8 @@ Mods: put file replacement mods in `%APPDATA%\BotWRecomp\mods` and enable them i
 `--no-mods` skips them for one run. See [`docs/mods.md`](docs/mods.md). This is untested in game so far.
 
 Useful flags: `--fps 30` for the game's original pace (60 is the default), `--scale 1` for
-1280×720, `--display fit|stretch|fill`, `--no-gyro`, `--gamepad-view`, `--mute`. `--renderer vulkan` is the
+1280×720 (`--scale 0.75` renders at 960×540 and `--scale 0.5` at 640×360, for weaker GPUs; the window
+stays 1280×720 and the image is upscaled), `--display fit|stretch|fill`, `--no-gyro`, `--gamepad-view`, `--mute`. `--renderer vulkan` is the
 only choice on Windows. Leave `--trace` and `--trace-hle` off for a normal run.
 
 ## Controls

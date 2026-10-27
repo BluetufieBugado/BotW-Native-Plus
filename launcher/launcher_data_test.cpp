@@ -232,14 +232,14 @@ void test_setup_wizard(const fs::path& root) {
     fs::remove_all(root, ec);
     write_text(root / "settings.ini", "# comment\nvolume=80\nscale=1\n");
     setupwizard::GamePrefs prefs;
-    prefs.scale = 2;
+    prefs.scale = 0.5f;
     prefs.fps = 60;
     prefs.layout = 1;
     prefs.gamepad_view = true;
     prefs.gyro = false;
     expect(setupwizard::write_game_prefs(root, prefs), "write_game_prefs");
     auto r = setupwizard::read_game_prefs(root);
-    expect(r.scale == 2 && r.fps == 60 && r.layout == 1 && r.gamepad_view && !r.gyro, "read_game_prefs round-trip");
+    expect(r.scale == 0.5f && r.fps == 60 && r.layout == 1 && r.gamepad_view && !r.gyro, "read_game_prefs round-trip");
     expect(read_text(root / "settings.ini").find("volume=80") != std::string::npos, "preserved volume=80");
     fs::remove_all(root, ec);
 }

@@ -124,6 +124,8 @@ enum {
     ID_WIZ_BUILD_CANCEL,
     ID_WIZ_EXE_BROWSE,
     ID_WIZ_LOG_EDIT,
+    ID_WIZ_SCALE_05X,
+    ID_WIZ_SCALE_075X,
     ID_WIZ_SCALE_1X,
     ID_WIZ_SCALE_2X,
     ID_WIZ_SCALE_3X,
@@ -2000,7 +2002,7 @@ struct SetupWizardWindow : Window {
 
     // Step 4 controls
     setupwizard::GamePrefs prefs;
-    HWND scale_1x = nullptr, scale_2x = nullptr, scale_3x = nullptr;
+    HWND scale_05x = nullptr, scale_075x = nullptr, scale_1x = nullptr, scale_2x = nullptr, scale_3x = nullptr;
     HWND fps_30 = nullptr, fps_60 = nullptr;
     HWND lay_auto = nullptr, lay_xbox = nullptr, lay_nin = nullptr;
     HWND chk_fs = nullptr, chk_gpv = nullptr, chk_gyro = nullptr;
@@ -2061,6 +2063,8 @@ struct SetupWizardWindow : Window {
         SetWindowLongW(log_e, GWL_STYLE, GetWindowLongW(log_e, GWL_STYLE) && ~ES_AUTOHSCROLL);
 
         // Step 4
+        scale_05x = ui::button(hwnd, ID_WIZ_SCALE_05X, L"360p (0.5x Low)", ui::Kind::Normal);
+        scale_075x = ui::button(hwnd, ID_WIZ_SCALE_075X, L"540p (0.75x)", ui::Kind::Normal);
         scale_1x = ui::button(hwnd, ID_WIZ_SCALE_1X, L"720p (1x Native)", ui::Kind::Normal);
         scale_2x = ui::button(hwnd, ID_WIZ_SCALE_2X, L"1440p (2x Crisp)", ui::Kind::Normal);
         scale_3x = ui::button(hwnd, ID_WIZ_SCALE_3X, L"2160p (3x 4K)", ui::Kind::Normal);
@@ -2182,9 +2186,11 @@ struct SetupWizardWindow : Window {
     }
 
     void sync_pref_buttons() {
-        ui::set_button_kind(scale_1x, prefs.scale == 1 ? ui::Kind::Primary : ui::Kind::Normal);
-        ui::set_button_kind(scale_2x, prefs.scale == 2 ? ui::Kind::Primary : ui::Kind::Normal);
-        ui::set_button_kind(scale_3x, prefs.scale >= 3 ? ui::Kind::Primary : ui::Kind::Normal);
+        ui::set_button_kind(scale_05x, prefs.scale < 0.6f ? ui::Kind::Primary : ui::Kind::Normal);
+        ui::set_button_kind(scale_075x, (prefs.scale >= 0.6f && prefs.scale < 0.9f) ? ui::Kind::Primary : ui::Kind::Normal);
+        ui::set_button_kind(scale_1x, (prefs.scale >= 0.9f && prefs.scale < 1.5f) ? ui::Kind::Primary : ui::Kind::Normal);
+        ui::set_button_kind(scale_2x, (prefs.scale >= 1.5f && prefs.scale < 2.5f) ? ui::Kind::Primary : ui::Kind::Normal);
+        ui::set_button_kind(scale_3x, prefs.scale >= 2.5f ? ui::Kind::Primary : ui::Kind::Normal);
 
         ui::set_button_kind(fps_30, prefs.fps < 45 ? ui::Kind::Primary : ui::Kind::Normal);
         ui::set_button_kind(fps_60, prefs.fps >= 45 ? ui::Kind::Primary : ui::Kind::Normal);
@@ -2227,6 +2233,8 @@ struct SetupWizardWindow : Window {
         EnableWindow(build_cancel_b, building);
         EnableWindow(exe_pick_b, !building);
 
+        show(scale_05x, step == 3);
+        show(scale_075x, step == 3);
         show(scale_1x, step == 3);
         show(scale_2x, step == 3);
         show(scale_3x, step == 3);
@@ -2292,6 +2300,8 @@ struct SetupWizardWindow : Window {
             ui::place_framed(log_e, {m, log_top, w - m, log_bot});
         } else if (step == 3) {
             int y = top + S(58);
+            place_row({scale_05x, scale_075x}, m, y, field, gap);
+            y += field + S(10);
             place_row({scale_1x, scale_2x, scale_3x}, m, y, field, gap);
             y += field + S(36);
             place_row({fps_30, fps_60}, m, y, field, gap);
@@ -2964,6 +2974,8 @@ struct SetupWizardWindow : Window {
                 }
                 break;
             }
+            case ID_WIZ_SCALE_05X: prefs.scale = 0.5f; sync_pref_buttons(); break;
+            case ID_WIZ_SCALE_075X: prefs.scale = 0.75f; sync_pref_buttons(); break;
             case ID_WIZ_SCALE_1X: prefs.scale = 1; sync_pref_buttons(); break;
             case ID_WIZ_SCALE_2X: prefs.scale = 2; sync_pref_buttons(); break;
             case ID_WIZ_SCALE_3X: prefs.scale = 3; sync_pref_buttons(); break;

@@ -49,7 +49,7 @@ struct BuildProgress {
 };
 
 struct GamePrefs {
-    int scale = 1;               // 1 = 720p (1x), 2 = 1440p (2x), 3 = 2160p (3x)
+    float scale = 1;            // 0.5 = 360p, 0.75 = 540p, 1 = 720p (native), 2 = 1440p, 3 = 2160p
     int fps = 30;                // 30 or 60
     int layout = -1;             // -1 = Auto, 1 = Xbox, 0 = Nintendo
     bool gamepad_view = false;

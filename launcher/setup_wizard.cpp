@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -321,7 +322,7 @@ GamePrefs read_game_prefs(const fs::path& user_root) {
         if (eq == std::string::npos) continue;
         std::string k = trim_cr(line.substr(0, eq));
         std::string v = trim_cr(line.substr(eq + 1));
-        if (k == "scale") p.scale = std::clamp(std::atoi(v.c_str()), 1, 4);
+        if (k == "scale") p.scale = std::clamp((float)std::atof(v.c_str()), 0.5f, 4.0f);
         else if (k == "fps") p.fps = std::atoi(v.c_str()) >= 45 ? 60 : 30;
         else if (k == "layout") p.layout = std::clamp(std::atoi(v.c_str()), -1, 1);
         else if (k == "gamepad_view") p.gamepad_view = (v != "0" && v != "false");
@@ -329,6 +330,15 @@ GamePrefs read_game_prefs(const fs::path& user_root) {
     }
     return p;
 }
+
+namespace {
+// "0.5", "0.75", "1", "2": what the runtime reads back with atof() in settings.ini.
+std::string scale_str(float s) {
+    char b[32];
+    snprintf(b, sizeof b, "%g", s);
+    return b;
+}
+}  // namespace
 
 bool write_game_prefs(const fs::path& user_root, const GamePrefs& prefs) {
     if (user_root.empty()) return false;
@@ -346,7 +356,7 @@ bool write_game_prefs(const fs::path& user_root, const GamePrefs& prefs) {
             if (eq != std::string::npos && clean[0] != '#' && clean[0] != ';') {
                 std::string k = trim_cr(clean.substr(0, eq));
                 if (k == "scale") {
-                    lines.push_back("scale=" + std::to_string(prefs.scale));
+                    lines.push_back("scale=" + scale_str(prefs.scale));
                     saw_scale = true;
                     continue;
                 }
@@ -374,7 +384,7 @@ bool write_game_prefs(const fs::path& user_root, const GamePrefs& prefs) {
             lines.push_back(clean);
         }
     }
-    if (!saw_scale) lines.push_back("scale=" + std::to_string(prefs.scale));
+    if (!saw_scale) lines.push_back("scale=" + scale_str(prefs.scale));
     if (!saw_fps) lines.push_back("fps=" + std::to_string(prefs.fps));
     if (!saw_layout) lines.push_back("layout=" + std::to_string(prefs.layout));
     if (!saw_gpv) lines.push_back(std::string("gamepad_view=") + (prefs.gamepad_view ? "1" : "0"));

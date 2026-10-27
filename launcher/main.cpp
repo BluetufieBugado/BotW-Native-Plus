@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -291,7 +292,27 @@ void detect_display() {
         A.disp_hz = (int)dm.dmDisplayFrequency;
     }
 }
-int recommended_scale() {
+struct ScaleOption {
+    float value;
+    const wchar_t* label;  // combo box text
+    const wchar_t* shortName;
+};
+const ScaleOption kScaleOptions[] = {
+    {0.5f, L"360p (0.5x, low - fastest)", L"360p"},
+    {0.75f, L"540p (0.75x, low)", L"540p"},
+    {1.0f, L"720p (1x, original)", L"720p"},
+    {2.0f, L"1440p (2x)", L"1440p"},
+    {3.0f, L"2160p (3x)", L"2160p"},
+};
+int scale_index(float s) {  // nearest listed option
+    int best = 0;
+    for (int i = 0; i < (int)(sizeof kScaleOptions / sizeof kScaleOptions[0]); i++)
+        if (std::fabs(kScaleOptions[i].value - s) < std::fabs(kScaleOptions[best].value - s)) best = i;
+    return best;
+}
+const wchar_t* scale_name(float s) { return kScaleOptions[scale_index(s)].shortName; }
+
+float recommended_scale() {
     if (A.disp_h >= 2160) return 3;
     if (A.disp_h >= 1440) return 2;
     return 1;
@@ -407,7 +428,7 @@ void build_wizard() {
     A.gfx_note = label(S_GFX, L"", X, 156, W, 40);
     label(S_GFX, L"Resolution:", X, 204, 110, 20);
     A.scale = on_page(S_GFX, mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, X + 120, 200, 220, 200, ID_SCALE));
-    for (auto s : {L"720p (1x, original)", L"1440p (2x)", L"2160p (3x)"}) SendMessageW(A.scale, CB_ADDSTRING, 0, (LPARAM)s);
+    for (const auto& o : kScaleOptions) SendMessageW(A.scale, CB_ADDSTRING, 0, (LPARAM)o.label);
     label(S_GFX, L"Frame rate:", X, 240, 110, 20);
     A.fps = on_page(S_GFX, mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, X + 120, 236, 220, 200, ID_FPS));
     for (auto s : {L"30 FPS (original)", L"60 FPS"}) SendMessageW(A.fps, CB_ADDSTRING, 0, (LPARAM)s);
@@ -578,12 +599,11 @@ void add_mod(const std::wstring& src) {
 }
 
 void fill_ready() {
-    const wchar_t* sc[] = {L"720p", L"1440p", L"2160p"};
     mods::State st = mods::load(fs::path(A.cfg.user));
     std::wstring s;
     s += L"Game folder:\r\n    " + A.cfg.game + L"\r\n";
     s += L"Saves folder:\r\n    " + A.cfg.user + L"\r\n";
-    s += L"Graphics: " + std::wstring(sc[std::clamp(A.prefs.scale, 1, 3) - 1]) + L", " + std::to_wstring(A.prefs.fps) + L" FPS" + (A.cfg.fullscreen ? L", fullscreen" : L", windowed") + L"\r\n";
+    s += L"Graphics: " + std::wstring(scale_name(A.prefs.scale)) + L", " + std::to_wstring(A.prefs.fps) + L" FPS" + (A.cfg.fullscreen ? L", fullscreen" : L", windowed") + L"\r\n";
     s += L"Mods: " + std::to_wstring(mods::enabled_count(st)) + L" on\r\n";
     s += A.cfg.exe.empty() ? L"\r\nWarning: BotWRecomp.exe was not found next to the launcher." : L"";
     SetWindowTextW(A.ready_text, s.c_str());
@@ -765,11 +785,11 @@ void enter_step(int s) {
         detect_display();
         std::wstring n = L"Your display: " + std::to_wstring(A.disp_w) + L" x " + std::to_wstring(A.disp_h) + L" at " +
                          std::to_wstring(A.disp_hz) + L" Hz.  Suggested: " +
-                         (recommended_scale() == 1 ? L"720p" : recommended_scale() == 2 ? L"1440p" : L"2160p") + L", " +
+                         scale_name(recommended_scale()) + L", " +
                          std::to_wstring(recommended_fps()) + L" FPS.";
         SetWindowTextW(A.gfx_note, n.c_str());
         if (!A.cfg.setup_done) { A.prefs.scale = recommended_scale(); A.prefs.fps = recommended_fps(); }
-        SendMessageW(A.scale, CB_SETCURSEL, std::clamp(A.prefs.scale, 1, 3) - 1, 0);
+        SendMessageW(A.scale, CB_SETCURSEL, scale_index(A.prefs.scale), 0);
         SendMessageW(A.fps, CB_SETCURSEL, A.prefs.fps >= 60 ? 1 : 0, 0);
         SendMessageW(A.fullscreen, BM_SETCHECK, A.cfg.fullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
         set_status(L"Press Next to keep these.", kOk);
@@ -786,10 +806,9 @@ void refresh_main() {
     std::wstring name = info.long_name.empty() ? L"The Legend of Zelda: Breath of the Wild" : widen(info.long_name);
     for (auto& c : name) if (c == L'\n') c = L' ';
     SetWindowTextW(A.main_title, name.c_str());
-    const wchar_t* sc[] = {L"720p", L"1440p", L"2160p"};
     mods::State st = mods::load(fs::path(A.cfg.user));
     std::wstring s = (info.has_title_version ? widen(gameinfo::version_name(info.title_version)) : std::wstring(L"version unknown")) +
-                     (info.has_dlc ? L"  -  DLC" : L"") + L"  -  " + sc[std::clamp(A.prefs.scale, 1, 3) - 1] + L", " +
+                     (info.has_dlc ? L"  -  DLC" : L"") + L"  -  " + scale_name(A.prefs.scale) + L", " +
                      std::to_wstring(A.prefs.fps) + L" FPS" + (A.cfg.fullscreen ? L", fullscreen" : L"") + L"  -  " +
                      std::to_wstring(mods::enabled_count(st)) + L" mods on" + (A.cfg.no_mods ? L" (mods disabled)" : L"") +
                      L"\r\nSaves: " + A.cfg.user;
@@ -827,7 +846,10 @@ void go_next() {
         break;
     }
     case S_GFX:
-        A.prefs.scale = (int)SendMessageW(A.scale, CB_GETCURSEL, 0, 0) + 1;
+        {
+        int sel = (int)SendMessageW(A.scale, CB_GETCURSEL, 0, 0);
+        if (sel >= 0 && sel < (int)(sizeof kScaleOptions / sizeof kScaleOptions[0])) A.prefs.scale = kScaleOptions[sel].value;
+    }
         A.prefs.fps = SendMessageW(A.fps, CB_GETCURSEL, 0, 0) == 1 ? 60 : 30;
         A.cfg.fullscreen = SendMessageW(A.fullscreen, BM_GETCHECK, 0, 0) == BST_CHECKED;
         break;
