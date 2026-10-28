@@ -1,4 +1,24 @@
-# BotW Recompiled for Windows
+# BotW Recompiled PLUS for Windows
+
+This is a small fork of [BOTW-Native](https://github.com/ryderclanky/BotW-Native) that adds new features to the project. Here is what has been added so far, compared to the original repository:
+
+
+
+Resolutions below 720p for lower-end devices ✔
+
+
+A graphics settings button in the launcher ✔
+
+## What I still plan to add:
+
+
+A mod menu similar to the one found in Cemu ⚙
+
+
+An on-screen FPS counter 🔍
+
+
+A way to improve performance on ultra-low-end devices ⏩
 
 https://github.com/user-attachments/assets/1b7d6766-425b-4e4b-833a-cb3c60369226
 
