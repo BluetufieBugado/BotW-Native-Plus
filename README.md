@@ -9,14 +9,13 @@ Resolutions below 720p for lower-end devices ✔
 
 A graphics settings button in the launcher ✔
 
+
+On-screen FPS counter ✔
+
 ## What I still plan to add:
 
 
 A mod menu similar to the one found in Cemu ⚙
-
-
-An on-screen FPS counter 🔍
-
 
 A way to improve performance on ultra-low-end devices ⏩
 
