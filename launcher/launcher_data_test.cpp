@@ -241,6 +241,16 @@ void test_setup_wizard(const fs::path& root) {
     auto r = setupwizard::read_game_prefs(root);
     expect(r.scale == 0.5f && r.fps == 60 && r.layout == 1 && r.gamepad_view && !r.gyro, "read_game_prefs round-trip");
     expect(read_text(root / "settings.ini").find("volume=80") != std::string::npos, "preserved volume=80");
+    expect(r.filter == 1 && r.display == 0, "filter/display keep the runtime defaults");
+    prefs.filter = 3;
+    prefs.display = 2;
+    expect(setupwizard::write_game_prefs(root, prefs), "write_game_prefs filter/display");
+    r = setupwizard::read_game_prefs(root);
+    expect(r.filter == 3 && r.display == 2, "filter/display round-trip");
+    write_text(root / "settings.ini", "scale=0\nfilter=9\ndisplay=-4\n");
+    r = setupwizard::read_game_prefs(root);
+    expect(r.scale == 1.0f, "scale=0 (fit display) reads as 720p, not 360p");
+    expect(r.filter == 3 && r.display == 0, "filter/display are clamped");
     fs::remove_all(root, ec);
 }
 

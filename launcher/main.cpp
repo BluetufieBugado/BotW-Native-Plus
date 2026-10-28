@@ -51,6 +51,7 @@ enum Id {
     ID_PLAY, ID_MODS, ID_SETTINGS, ID_OPEN_GAME, ID_OPEN_USER, ID_OPEN_LOG, ID_CLASSIC,
     ID_MODLIST, ID_MODSAVE, ID_GAME_EDIT, ID_USER_EDIT,
     ID_SRC_EDIT, ID_SRC_BROWSE, ID_TC_INSTALL, ID_TC_LINK, ID_TC_RECHECK, ID_PREBUILT, ID_BUILD, ID_BUILD_STOP,
+    ID_GFX, ID_GFX_SAVE,
 };
 
 struct Config {
@@ -448,6 +449,7 @@ void build_main() {
     HWND b[] = {
         mk(L"BUTTON", L"Mods...", BS_PUSHBUTTON | WS_TABSTOP, 24, 196, 160, 30, ID_MODS),
         mk(L"BUTTON", L"Settings (run setup again)", BS_PUSHBUTTON | WS_TABSTOP, 192, 196, 200, 30, ID_SETTINGS),
+        mk(L"BUTTON", L"Graphics...", BS_PUSHBUTTON | WS_TABSTOP, 400, 196, 140, 30, ID_GFX),
         mk(L"BUTTON", L"Open game folder", BS_PUSHBUTTON | WS_TABSTOP, 24, 236, 160, 30, ID_OPEN_GAME),
         mk(L"BUTTON", L"Open saves folder", BS_PUSHBUTTON | WS_TABSTOP, 192, 236, 160, 30, ID_OPEN_USER),
         mk(L"BUTTON", L"Open log", BS_PUSHBUTTON | WS_TABSTOP, 360, 236, 120, 30, ID_OPEN_LOG),
@@ -981,6 +983,76 @@ void show_mods() {
     EnableWindow(A.wnd, FALSE);
 }
 
+// ---------- graphics window ----------
+// Quick access to the picture options without running the whole setup again.
+HWND g_gfx_wnd{}, g_gfx_scale{}, g_gfx_fps{}, g_gfx_filter{}, g_gfx_display{}, g_gfx_full{};
+int g_gfx_scale0 = 0;  // combo index shown when the window opened (a custom scale is kept unless changed)
+
+const wchar_t* const kFilterNames[] = {L"Bilinear (smooth)", L"Bicubic (sharper, default)", L"Hermite", L"Nearest neighbour (pixelated)"};
+const wchar_t* const kDisplayNames[] = {L"Fit (black bars, keeps proportions)", L"Stretch (fills the window)", L"Fill (crops the edges)"};
+
+LRESULT CALLBACK gfx_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_COMMAND:
+        if (LOWORD(wp) == ID_GFX_SAVE) {
+            int sel = (int)SendMessageW(g_gfx_scale, CB_GETCURSEL, 0, 0);
+            if (sel >= 0 && sel < (int)(sizeof kScaleOptions / sizeof kScaleOptions[0]) && sel != g_gfx_scale0)
+                A.prefs.scale = kScaleOptions[sel].value;
+            A.prefs.fps = SendMessageW(g_gfx_fps, CB_GETCURSEL, 0, 0) == 1 ? 60 : 30;
+            int f = (int)SendMessageW(g_gfx_filter, CB_GETCURSEL, 0, 0);
+            int d = (int)SendMessageW(g_gfx_display, CB_GETCURSEL, 0, 0);
+            if (f >= 0 && f <= 3) A.prefs.filter = f;
+            if (d >= 0 && d <= 2) A.prefs.display = d;
+            A.cfg.fullscreen = SendMessageW(g_gfx_full, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            save_ini();
+            if (!setupwizard::write_game_prefs(fs::path(A.cfg.user), A.prefs))
+                MessageBoxW(w, L"The graphics options could not be saved to settings.ini in the saves folder.", kTitle, MB_ICONWARNING);
+            DestroyWindow(w);
+        } else if (LOWORD(wp) == IDCANCEL) DestroyWindow(w);
+        return 0;
+    case WM_CLOSE: DestroyWindow(w); return 0;
+    case WM_DESTROY: EnableWindow(A.wnd, TRUE); SetForegroundWindow(A.wnd); g_gfx_wnd = nullptr; refresh_main(); return 0;
+    }
+    return DefWindowProcW(w, m, wp, lp);
+}
+
+void show_gfx() {
+    if (g_gfx_wnd || g_mods_wnd) return;
+    A.prefs = setupwizard::read_game_prefs(fs::path(A.cfg.user));  // pick up changes made from the in-game menu
+    RECT r{0, 0, 400, 290};
+    AdjustWindowRect(&r, WS_CAPTION | WS_SYSMENU, FALSE);
+    g_gfx_wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"BotWNativeGfx", L"Graphics", WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+                                CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, A.wnd, nullptr, A.inst, nullptr);
+    auto c = [&](const wchar_t* cls, const wchar_t* t, DWORD st, int x, int y, int ww, int h, int id) {
+        HWND hh = CreateWindowExW(0, cls, t, WS_CHILD | WS_VISIBLE | st, x, y, ww, h, g_gfx_wnd, (HMENU)(INT_PTR)id, A.inst, nullptr);
+        SendMessageW(hh, WM_SETFONT, (WPARAM)A.font, TRUE);
+        return hh;
+    };
+    c(L"STATIC", L"Lower resolutions run faster on weak graphics. These apply the next time you start the game.", SS_LEFT, 12, 10, 376, 36, 0);
+    c(L"STATIC", L"Resolution:", SS_LEFT, 12, 58, 100, 20, 0);
+    g_gfx_scale = c(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 120, 54, 268, 200, 0);
+    for (const auto& o : kScaleOptions) SendMessageW(g_gfx_scale, CB_ADDSTRING, 0, (LPARAM)o.label);
+    c(L"STATIC", L"Frame rate:", SS_LEFT, 12, 94, 100, 20, 0);
+    g_gfx_fps = c(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 120, 90, 268, 200, 0);
+    for (auto s : {L"30 FPS (original)", L"60 FPS"}) SendMessageW(g_gfx_fps, CB_ADDSTRING, 0, (LPARAM)s);
+    c(L"STATIC", L"Scaling filter:", SS_LEFT, 12, 130, 100, 20, 0);
+    g_gfx_filter = c(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 120, 126, 268, 200, 0);
+    for (auto s : kFilterNames) SendMessageW(g_gfx_filter, CB_ADDSTRING, 0, (LPARAM)s);
+    c(L"STATIC", L"Picture fit:", SS_LEFT, 12, 166, 100, 20, 0);
+    g_gfx_display = c(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 120, 162, 268, 200, 0);
+    for (auto s : kDisplayNames) SendMessageW(g_gfx_display, CB_ADDSTRING, 0, (LPARAM)s);
+    g_gfx_full = c(L"BUTTON", L"Start in fullscreen", BS_AUTOCHECKBOX | WS_TABSTOP, 12, 202, 376, 22, 0);
+    c(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 204, 246, 90, 28, IDCANCEL);
+    c(L"BUTTON", L"Save", BS_DEFPUSHBUTTON | WS_TABSTOP, 300, 246, 88, 28, ID_GFX_SAVE);
+    g_gfx_scale0 = scale_index(A.prefs.scale);
+    SendMessageW(g_gfx_scale, CB_SETCURSEL, g_gfx_scale0, 0);
+    SendMessageW(g_gfx_fps, CB_SETCURSEL, A.prefs.fps >= 60 ? 1 : 0, 0);
+    SendMessageW(g_gfx_filter, CB_SETCURSEL, A.prefs.filter, 0);
+    SendMessageW(g_gfx_display, CB_SETCURSEL, A.prefs.display, 0);
+    SendMessageW(g_gfx_full, BM_SETCHECK, A.cfg.fullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
+    EnableWindow(A.wnd, FALSE);
+}
+
 int ask_rebuild(HWND w) {
     return MessageBoxW(w, L"Rebuild the game from the source folder? This recompiles and compiles everything that changed "
                           L"and can take a long time. The current game program is kept as BotWRecomp.old.exe.", kTitle, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
@@ -1027,7 +1099,7 @@ LRESULT CALLBACK wnd_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == 2) { tick_build(); return 0; }
         if (A.wizard && A.step == S_PAD) refresh_pads();
-        if (!A.wizard && !g_mods_wnd) {
+        if (!A.wizard && !g_mods_wnd && !g_gfx_wnd) {
             bool run = process_running(L"BotWRecomp.exe");
             EnableWindow(A.play, !run);
         }
@@ -1083,6 +1155,7 @@ LRESULT CALLBACK wnd_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
         case ID_MOD_ADDDIR: add_mod(pick_folder(w, L"Choose a mod folder", L"")); break;
         case ID_PLAY: play(); break;
         case ID_MODS: show_mods(); break;
+        case ID_GFX: show_gfx(); break;
         case ID_SETTINGS: A.wizard = true; enter_step(S_GAME); break;
         case ID_OPEN_GAME: if (is_dir(A.cfg.game)) open_folder(A.cfg.game); break;
         case ID_OPEN_USER: open_folder(A.cfg.user); break;
@@ -1145,6 +1218,9 @@ static int run(HINSTANCE inst, int show) {
     wc.lpfnWndProc = mods_proc;
     wc.lpszClassName = L"BotWNativeMods";
     RegisterClassW(&wc);
+    wc.lpfnWndProc = gfx_proc;
+    wc.lpszClassName = L"BotWNativeGfx";
+    RegisterClassW(&wc);
 
     load_ini();
     A.prefs = setupwizard::read_game_prefs(fs::path(A.cfg.user));
@@ -1174,7 +1250,7 @@ static int run(HINSTANCE inst, int show) {
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
-        HWND top = g_mods_wnd ? g_mods_wnd : A.wnd;
+        HWND top = g_mods_wnd ? g_mods_wnd : g_gfx_wnd ? g_gfx_wnd : A.wnd;
         if (IsDialogMessageW(top, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
