@@ -2186,7 +2186,7 @@ struct SetupWizardWindow : Window {
     }
 
     void sync_pref_buttons() {
-        ui::set_button_kind(scale_05x, prefs.scale < 0.6f ? ui::Kind::Primary : ui::Kind::Normal);
+        ui::set_button_kind(scale_05x, (prefs.scale > 0 && prefs.scale < 0.6f) ? ui::Kind::Primary : ui::Kind::Normal);
         ui::set_button_kind(scale_075x, (prefs.scale >= 0.6f && prefs.scale < 0.9f) ? ui::Kind::Primary : ui::Kind::Normal);
         ui::set_button_kind(scale_1x, (prefs.scale >= 0.9f && prefs.scale < 1.5f) ? ui::Kind::Primary : ui::Kind::Normal);
         ui::set_button_kind(scale_2x, (prefs.scale >= 1.5f && prefs.scale < 2.5f) ? ui::Kind::Primary : ui::Kind::Normal);

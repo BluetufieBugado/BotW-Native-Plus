@@ -247,9 +247,16 @@ void test_setup_wizard(const fs::path& root) {
     expect(setupwizard::write_game_prefs(root, prefs), "write_game_prefs filter/display");
     r = setupwizard::read_game_prefs(root);
     expect(r.filter == 3 && r.display == 2, "filter/display round-trip");
+    expect(!r.show_fps, "show_fps defaults to off");
+    prefs.show_fps = true;
+    expect(setupwizard::write_game_prefs(root, prefs), "write_game_prefs show_fps");
+    r = setupwizard::read_game_prefs(root);
+    expect(r.show_fps, "show_fps round-trip");
     write_text(root / "settings.ini", "scale=0\nfilter=9\ndisplay=-4\n");
     r = setupwizard::read_game_prefs(root);
-    expect(r.scale == 1.0f, "scale=0 (fit display) reads as 720p, not 360p");
+    expect(r.scale == 0.0f, "scale=0 (automatic) stays automatic");
+    expect(setupwizard::write_game_prefs(root, r), "write_game_prefs auto scale");
+    expect(read_text(root / "settings.ini").find("scale=0\n") != std::string::npos, "scale=0 is written back unchanged");
     expect(r.filter == 3 && r.display == 0, "filter/display are clamped");
     fs::remove_all(root, ec);
 }

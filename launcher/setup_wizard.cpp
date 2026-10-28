@@ -323,9 +323,9 @@ GamePrefs read_game_prefs(const fs::path& user_root) {
         std::string k = trim_cr(line.substr(0, eq));
         std::string v = trim_cr(line.substr(eq + 1));
         if (k == "scale") {
-            // The runtime writes scale=0 for "fit the display" (its default); show that as 720p, not 360p.
+            // 0 = automatic (the runtime fits the display); keep it as is instead of turning it into a fixed size.
             float s = (float)std::atof(v.c_str());
-            p.scale = s <= 0 ? 1.0f : std::clamp(s, 0.5f, 4.0f);
+            p.scale = s <= 0 ? 0.0f : std::clamp(s, 0.5f, 4.0f);
         }
         else if (k == "filter") p.filter = std::clamp(std::atoi(v.c_str()), 0, 3);
         else if (k == "display") p.display = std::clamp(std::atoi(v.c_str()), 0, 2);
@@ -333,6 +333,7 @@ GamePrefs read_game_prefs(const fs::path& user_root) {
         else if (k == "layout") p.layout = std::clamp(std::atoi(v.c_str()), -1, 1);
         else if (k == "gamepad_view") p.gamepad_view = (v != "0" && v != "false");
         else if (k == "gyro") p.gyro = (v != "0" && v != "false");
+        else if (k == "show_fps") p.show_fps = (v != "0" && v != "false");
     }
     return p;
 }
@@ -353,7 +354,7 @@ bool write_game_prefs(const fs::path& user_root, const GamePrefs& prefs) {
     fs::path path = user_root / "settings.ini";
     std::vector<std::string> lines;
     bool saw_scale = false, saw_fps = false, saw_layout = false, saw_gpv = false, saw_gyro = false;
-    bool saw_filter = false, saw_display = false;
+    bool saw_filter = false, saw_display = false, saw_show_fps = false;
     if (file_exists(path)) {
         std::ifstream in(path);
         std::string line;
@@ -392,6 +393,11 @@ bool write_game_prefs(const fs::path& user_root, const GamePrefs& prefs) {
                     saw_gpv = true;
                     continue;
                 }
+                if (k == "show_fps") {
+                    lines.push_back(std::string("show_fps=") + (prefs.show_fps ? "1" : "0"));
+                    saw_show_fps = true;
+                    continue;
+                }
                 if (k == "gyro") {
                     lines.push_back(std::string("gyro=") + (prefs.gyro ? "1" : "0"));
                     saw_gyro = true;
@@ -408,6 +414,7 @@ bool write_game_prefs(const fs::path& user_root, const GamePrefs& prefs) {
     if (!saw_layout) lines.push_back("layout=" + std::to_string(prefs.layout));
     if (!saw_gpv) lines.push_back(std::string("gamepad_view=") + (prefs.gamepad_view ? "1" : "0"));
     if (!saw_gyro) lines.push_back(std::string("gyro=") + (prefs.gyro ? "1" : "0"));
+    if (!saw_show_fps) lines.push_back(std::string("show_fps=") + (prefs.show_fps ? "1" : "0"));
 
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out) return false;

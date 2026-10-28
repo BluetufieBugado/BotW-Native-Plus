@@ -299,6 +299,7 @@ struct ScaleOption {
     const wchar_t* shortName;
 };
 const ScaleOption kScaleOptions[] = {
+    {0.0f, L"Automatic (fits your display)", L"Auto"},
     {0.5f, L"360p (0.5x, low - fastest)", L"360p"},
     {0.75f, L"540p (0.75x, low)", L"540p"},
     {1.0f, L"720p (1x, original)", L"720p"},
@@ -985,7 +986,7 @@ void show_mods() {
 
 // ---------- graphics window ----------
 // Quick access to the picture options without running the whole setup again.
-HWND g_gfx_wnd{}, g_gfx_scale{}, g_gfx_fps{}, g_gfx_filter{}, g_gfx_display{}, g_gfx_full{};
+HWND g_gfx_wnd{}, g_gfx_scale{}, g_gfx_fps{}, g_gfx_filter{}, g_gfx_display{}, g_gfx_full{}, g_gfx_showfps{};
 int g_gfx_scale0 = 0;  // combo index shown when the window opened (a custom scale is kept unless changed)
 
 const wchar_t* const kFilterNames[] = {L"Bilinear (smooth)", L"Bicubic (sharper, default)", L"Hermite", L"Nearest neighbour (pixelated)"};
@@ -1003,6 +1004,7 @@ LRESULT CALLBACK gfx_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
             int d = (int)SendMessageW(g_gfx_display, CB_GETCURSEL, 0, 0);
             if (f >= 0 && f <= 3) A.prefs.filter = f;
             if (d >= 0 && d <= 2) A.prefs.display = d;
+            A.prefs.show_fps = SendMessageW(g_gfx_showfps, BM_GETCHECK, 0, 0) == BST_CHECKED;
             A.cfg.fullscreen = SendMessageW(g_gfx_full, BM_GETCHECK, 0, 0) == BST_CHECKED;
             save_ini();
             if (!setupwizard::write_game_prefs(fs::path(A.cfg.user), A.prefs))
@@ -1019,7 +1021,7 @@ LRESULT CALLBACK gfx_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
 void show_gfx() {
     if (g_gfx_wnd || g_mods_wnd) return;
     A.prefs = setupwizard::read_game_prefs(fs::path(A.cfg.user));  // pick up changes made from the in-game menu
-    RECT r{0, 0, 400, 290};
+    RECT r{0, 0, 400, 322};
     AdjustWindowRect(&r, WS_CAPTION | WS_SYSMENU, FALSE);
     g_gfx_wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"BotWNativeGfx", L"Graphics", WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
                                 CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, A.wnd, nullptr, A.inst, nullptr);
@@ -1042,14 +1044,16 @@ void show_gfx() {
     g_gfx_display = c(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 120, 162, 268, 200, 0);
     for (auto s : kDisplayNames) SendMessageW(g_gfx_display, CB_ADDSTRING, 0, (LPARAM)s);
     g_gfx_full = c(L"BUTTON", L"Start in fullscreen", BS_AUTOCHECKBOX | WS_TABSTOP, 12, 202, 376, 22, 0);
-    c(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 204, 246, 90, 28, IDCANCEL);
-    c(L"BUTTON", L"Save", BS_DEFPUSHBUTTON | WS_TABSTOP, 300, 246, 88, 28, ID_GFX_SAVE);
+    g_gfx_showfps = c(L"BUTTON", L"Show FPS counter (top right of the screen)", BS_AUTOCHECKBOX | WS_TABSTOP, 12, 228, 376, 22, 0);
+    c(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 204, 278, 90, 28, IDCANCEL);
+    c(L"BUTTON", L"Save", BS_DEFPUSHBUTTON | WS_TABSTOP, 300, 278, 88, 28, ID_GFX_SAVE);
     g_gfx_scale0 = scale_index(A.prefs.scale);
     SendMessageW(g_gfx_scale, CB_SETCURSEL, g_gfx_scale0, 0);
     SendMessageW(g_gfx_fps, CB_SETCURSEL, A.prefs.fps >= 60 ? 1 : 0, 0);
     SendMessageW(g_gfx_filter, CB_SETCURSEL, A.prefs.filter, 0);
     SendMessageW(g_gfx_display, CB_SETCURSEL, A.prefs.display, 0);
     SendMessageW(g_gfx_full, BM_SETCHECK, A.cfg.fullscreen ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_gfx_showfps, BM_SETCHECK, A.prefs.show_fps ? BST_CHECKED : BST_UNCHECKED, 0);
     EnableWindow(A.wnd, FALSE);
 }
 
