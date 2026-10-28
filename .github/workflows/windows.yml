@@ -7,6 +7,7 @@ name: Windows (MinGW)
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
@@ -40,3 +41,15 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --parallel -- -k 0
+      # The launchers do not need the game code, so they are usable from this build. The
+      # BotWRecomp.exe here is the guest stub (no game), so it is left out of the download to
+      # keep anyone from replacing a real build with it.
+      - name: Package launchers
+        run: |
+          cmake --build build --target botw_package
+          rm -f build/package/BotWRecomp.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BotW-Native-launchers-windows
+          path: build/package
+          retention-days: 14
