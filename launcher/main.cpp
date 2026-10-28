@@ -23,6 +23,7 @@
 #include "setup_wizard.h"
 
 #include <algorithm>
+#include <map>
 #include <atomic>
 #include <cmath>
 #include <filesystem>
@@ -52,6 +53,7 @@ enum Id {
     ID_MODLIST, ID_MODSAVE, ID_GAME_EDIT, ID_USER_EDIT,
     ID_SRC_EDIT, ID_SRC_BROWSE, ID_TC_INSTALL, ID_TC_LINK, ID_TC_RECHECK, ID_PREBUILT, ID_BUILD, ID_BUILD_STOP,
     ID_GFX, ID_GFX_SAVE,
+    ID_MOD_IMPORT_ZIP, ID_MOD_IMPORT_DIR, ID_MOD_GET,
 };
 
 struct Config {
@@ -920,6 +922,25 @@ void play() {
 HWND g_mods_wnd{}, g_mods_list{};
 mods::State g_mods;
 
+// Rebuilds the list from disk. With keep_ticks, boxes ticked or cleared but not saved yet stay as they are.
+void fill_mod_list(bool keep_ticks) {
+    std::map<std::string, bool> ticks;
+    if (keep_ticks)
+        for (size_t i = 0; i < g_mods.list.size(); i++)
+            ticks[g_mods.list[i].folder] = ListView_GetCheckState(g_mods_list, (int)i) != 0;
+    g_mods = mods::load(fs::path(A.cfg.user));
+    ListView_DeleteAllItems(g_mods_list);
+    for (size_t i = 0; i < g_mods.list.size(); i++) {
+        auto t = ticks.find(g_mods.list[i].folder);
+        if (t != ticks.end()) g_mods.list[i].enabled = t->second;
+        std::wstring n = widen(g_mods.list[i].name);
+        LVITEMW it{LVIF_TEXT, (int)i};
+        it.pszText = n.data();
+        ListView_InsertItem(g_mods_list, &it);
+        ListView_SetCheckState(g_mods_list, (int)i, g_mods.list[i].enabled);
+    }
+}
+
 LRESULT CALLBACK mods_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_COMMAND:
@@ -934,16 +955,32 @@ LRESULT CALLBACK mods_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
             if (!src.empty()) {
                 std::string folder, err;
                 if (!mods::install_mod(fs::path(A.cfg.user), fs::path(src), folder, err)) MessageBoxW(w, widen(err).c_str(), kTitle, MB_ICONWARNING);
-                g_mods = mods::load(fs::path(A.cfg.user));
-                ListView_DeleteAllItems(g_mods_list);
-                for (size_t i = 0; i < g_mods.list.size(); i++) {
-                    std::wstring n = widen(g_mods.list[i].name);
-                    LVITEMW it{LVIF_TEXT, (int)i};
-                    it.pszText = n.data();
-                    ListView_InsertItem(g_mods_list, &it);
-                    ListView_SetCheckState(g_mods_list, (int)i, g_mods.list[i].enabled);
+                fill_mod_list(true);
+            }
+        } else if (LOWORD(wp) == ID_MOD_IMPORT_ZIP || LOWORD(wp) == ID_MOD_IMPORT_DIR) {
+            std::wstring src = LOWORD(wp) == ID_MOD_IMPORT_ZIP ? pick_zip(w) : pick_folder(w, L"Choose Cemu's graphicPacks folder", L"");
+            if (!src.empty()) {
+                SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+                mods::ImportReport rep;
+                std::string err;
+                bool ok = mods::import_cemu_packs(fs::path(A.cfg.user), fs::path(src), rep, err);
+                SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+                fill_mod_list(true);
+                if (!ok) {
+                    MessageBoxW(w, widen(err).c_str(), kTitle, MB_ICONWARNING);
+                } else {
+                    std::wstring msg = L"Imported " + std::to_wstring(rep.imported.size()) +
+                                       L" Breath of the Wild pack(s). All of them are switched off: tick the ones you want, then press Save.";
+                    if (rep.with_patches > 0)
+                        msg += L"\r\n\r\n" + std::to_wstring(rep.with_patches) +
+                               L" of them patch the game's code. This port applies only data changes and simple function patches, "
+                               L"so parts of those packs may do nothing. Leave the FPS packs off: 60 FPS is already built in.";
+                    if (rep.failed > 0) msg += L"\r\n\r\n" + std::to_wstring(rep.failed) + L" pack(s) could not be copied.";
+                    MessageBoxW(w, msg.c_str(), kTitle, MB_ICONINFORMATION);
                 }
             }
+        } else if (LOWORD(wp) == ID_MOD_GET) {
+            ShellExecuteW(w, L"open", L"https://github.com/cemu-project/cemu_graphic_packs/releases", nullptr, nullptr, SW_SHOWNORMAL);
         }
         return 0;
     case WM_CLOSE: DestroyWindow(w); return 0;
@@ -954,7 +991,7 @@ LRESULT CALLBACK mods_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
 
 void show_mods() {
     if (g_mods_wnd) return;
-    RECT r{0, 0, 520, 380};
+    RECT r{0, 0, 520, 416};
     AdjustWindowRect(&r, WS_CAPTION | WS_SYSMENU, FALSE);
     g_mods_wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"BotWNativeMods", L"Mods", WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
                                  CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, A.wnd, nullptr, A.inst, nullptr);
@@ -971,16 +1008,12 @@ void show_mods() {
     ListView_InsertColumn(g_mods_list, 0, &col);
     c(L"BUTTON", L"Add archive...", BS_PUSHBUTTON, 12, 330, 110, 28, ID_MOD_ADD);
     c(L"BUTTON", L"Add folder...", BS_PUSHBUTTON, 128, 330, 110, 28, ID_MOD_ADDDIR);
+    c(L"BUTTON", L"Import Cemu zip...", BS_PUSHBUTTON, 12, 366, 150, 28, ID_MOD_IMPORT_ZIP);
+    c(L"BUTTON", L"Import Cemu folder...", BS_PUSHBUTTON, 168, 366, 170, 28, ID_MOD_IMPORT_DIR);
+    c(L"BUTTON", L"Get packs online", BS_PUSHBUTTON, 344, 366, 164, 28, ID_MOD_GET);
     c(L"BUTTON", L"Cancel", BS_PUSHBUTTON, 312, 330, 90, 28, IDCANCEL);
     c(L"BUTTON", L"Save", BS_DEFPUSHBUTTON, 410, 330, 98, 28, ID_MODSAVE);
-    g_mods = mods::load(fs::path(A.cfg.user));
-    for (size_t i = 0; i < g_mods.list.size(); i++) {
-        std::wstring n = widen(g_mods.list[i].name);
-        LVITEMW it{LVIF_TEXT, (int)i};
-        it.pszText = n.data();
-        ListView_InsertItem(g_mods_list, &it);
-        ListView_SetCheckState(g_mods_list, (int)i, g_mods.list[i].enabled);
-    }
+    fill_mod_list(false);
     EnableWindow(A.wnd, FALSE);
 }
 

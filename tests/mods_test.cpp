@@ -341,6 +341,14 @@ static void test_presets_textures_shaders_and_patches(const fs::path& root) {
         "0x02500204 = blr\n"
         "0x02500300 = b 0x02500400\n"
         "0x02500508 = nop\n");
+    // Community packs: patch_*.asm, with the checksum Cemu uses for BotW v208.
+    put(user / "mods" / "GraphicsMod" / "patch_cemu.asm",
+        "[BotW_CemuPackV208]\n"
+        "moduleMatches = 0x6267BFD0\n"
+        "0x10500120 = .int 777\n\n"
+        "[BotW_OtherModule]\n"
+        "moduleMatches = 0x12345678\n"
+        "0x10500130 = .int 5\n");
 
     // Set up simulated guest memory and dispatch hooks
     static std::map<uint32_t, uint8_t> sim_mem;
@@ -425,6 +433,8 @@ static void test_presets_textures_shaders_and_patches(const fs::path& root) {
     CHECK(sim_hooks[0x02500300] == "redirect" && sim_redirects[0x02500300] == 0x02500400u);
     CHECK(mods::loaded()[0].code_patches_applied == 3);
     CHECK(mods::loaded()[0].mid_fn_patches_skipped == 1);
+    CHECK(read_be32(0x10500120) == 777u);  // patch_*.asm with moduleMatches = 0x6267BFD0 is applied
+    CHECK(read_be32(0x10500130) == 0u);    // a block for another module is not
 
     // Switch presets to 4K + Fast Speed and hot-reload!
     CHECK(mods::set_preset("GraphicsMod", "Resolution", "4K"));

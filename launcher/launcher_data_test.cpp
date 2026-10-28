@@ -261,6 +261,103 @@ void test_setup_wizard(const fs::path& root) {
     fs::remove_all(root, ec);
 }
 
+std::vector<uint8_t> make_stored_zip(const std::vector<std::pair<std::string, std::string>>& files) {
+    auto u16 = [](std::vector<uint8_t>& v, uint16_t x) {
+        v.push_back(static_cast<uint8_t>(x & 0xff));
+        v.push_back(static_cast<uint8_t>((x >> 8) & 0xff));
+    };
+    auto u32 = [&](std::vector<uint8_t>& v, uint32_t x) {
+        u16(v, static_cast<uint16_t>(x & 0xffff));
+        u16(v, static_cast<uint16_t>(x >> 16));
+    };
+    struct Entry { std::string name, data; uint32_t offset; };
+    std::vector<Entry> entries;
+    std::vector<uint8_t> out;
+    for (const auto& [name, data] : files) {
+        uint32_t off = static_cast<uint32_t>(out.size());
+        u32(out, 0x04034b50u); u16(out, 20); u16(out, 0); u16(out, 0); u16(out, 0); u16(out, 0);
+        u32(out, 0); u32(out, static_cast<uint32_t>(data.size())); u32(out, static_cast<uint32_t>(data.size()));
+        u16(out, static_cast<uint16_t>(name.size())); u16(out, 0);
+        out.insert(out.end(), name.begin(), name.end());
+        out.insert(out.end(), data.begin(), data.end());
+        entries.push_back({name, data, off});
+    }
+    uint32_t cd_off = static_cast<uint32_t>(out.size());
+    for (const auto& e : entries) {
+        u32(out, 0x02014b50u); u16(out, 20); u16(out, 20); u16(out, 0); u16(out, 0); u16(out, 0); u16(out, 0);
+        u32(out, 0); u32(out, static_cast<uint32_t>(e.data.size())); u32(out, static_cast<uint32_t>(e.data.size()));
+        u16(out, static_cast<uint16_t>(e.name.size())); u16(out, 0); u16(out, 0); u16(out, 0); u16(out, 0);
+        u32(out, 0); u32(out, e.offset);
+        out.insert(out.end(), e.name.begin(), e.name.end());
+    }
+    uint32_t cd_size = static_cast<uint32_t>(out.size()) - cd_off;
+    u32(out, 0x06054b50u); u16(out, 0); u16(out, 0);
+    u16(out, static_cast<uint16_t>(entries.size())); u16(out, static_cast<uint16_t>(entries.size()));
+    u32(out, cd_size); u32(out, cd_off); u16(out, 0);
+    return out;
+}
+
+void test_cemu_import(const fs::path& root) {
+    fs::remove_all(root);
+    const std::string botw =
+        "[Definition]\ntitleIds = 00050000101C9300,00050000101C9400,00050000101C9500\nname = Pack\nversion = 7\n";
+    expect(mods::rules_target_botw(botw), "titleIds with the BotW ids match");
+    expect(mods::rules_target_botw("\xEF\xBB\xBF[Definition]\r\nTitleIds = 0005000e101c9400\r\n"), "update id, BOM, CRLF and case");
+    expect(!mods::rules_target_botw("[Definition]\ntitleIds = 0005000010176900\n"), "another game does not match");
+    expect(!mods::rules_target_botw("[Definition]\nname = no title ids\n"), "no titleIds does not match");
+
+    // A folder of packs, as in Cemu's graphicPacks folder.
+    fs::path bundle = root / "bundle";
+    write_text(bundle / "Splatoon" / "Resolution" / "rules.txt", "[Definition]\ntitleIds = 0005000010176900\nname = Splat\n");
+    write_text(bundle / "BreathOfTheWild" / "Graphics" / "rules.txt", botw);
+    write_text(bundle / "BreathOfTheWild" / "Graphics" / "7cd338ce4c6ea935_0000000000000079_ps.txt", "void main() {}\n");
+    write_text(bundle / "BreathOfTheWild" / "Mods" / "FPS++" / "rules.txt", botw);
+    write_text(bundle / "BreathOfTheWild" / "Mods" / "FPS++" / "patch_GameSpeed.asm", "[X]\nmoduleMatches = 0x6267BFD0\n");
+    write_text(bundle / "BreathOfTheWild" / "A" / "Fix" / "rules.txt", botw);
+    write_text(bundle / "BreathOfTheWild" / "B" / "Fix" / "rules.txt", botw);
+
+    fs::path user = root / "user";
+    write_text(user / "mods" / "Graphics" / "rules.txt", "[Definition]\nname = Mine\n");  // the user's own mod
+    mods::ImportReport rep;
+    std::string err;
+    expect(mods::import_cemu_packs(user, bundle, rep, err), "import from a folder: " + err);
+    expect(rep.imported.size() == 4, "four BotW packs imported");
+    expect(rep.skipped_other_games == 1, "the Splatoon pack is skipped");
+    expect(rep.with_patches == 1, "one imported pack has patch files");
+    expect(read_text(user / "mods" / "Graphics" / "rules.txt").find("Mine") != std::string::npos, "the user's own mod is not overwritten");
+    expect(fs::exists(user / "mods" / "BreathOfTheWild_Graphics" / "7cd338ce4c6ea935_0000000000000079_ps.txt"), "the pack's shader file is copied");
+    expect(fs::exists(user / "mods" / "FPS++" / "patch_GameSpeed.asm"), "patch_*.asm is copied");
+    expect(fs::exists(user / "mods" / "Fix") && fs::exists(user / "mods" / "B_Fix"), "same names get a distinct folder");
+    mods::State st = mods::load(user);
+    expect(mods::enabled_count(st) == 0, "imported packs are switched off");
+    expect(mods::import_cemu_packs(user, bundle, rep, err) && rep.imported.size() == 4, "importing again refreshes the packs");
+    expect(!fs::exists(user / "mods" / "BreathOfTheWild_Graphics_2"), "importing again does not pile up copies");
+    expect(!mods::import_cemu_packs(user, user / "mods", rep, err), "the mods folder itself is refused");
+
+    // A zip that also holds another game's packs: only the BotW part is unpacked.
+    fs::path zip = root / "packs.zip";
+    auto bytes = make_stored_zip({
+        {"graphicPacks/BreathOfTheWild/Graphics/rules.txt", botw},
+        {"graphicPacks/BreathOfTheWild/Graphics/x_ps.txt", "void main() {}\n"},
+        {"graphicPacks/BreathOfTheWild/Mods/RemoveFog/rules.txt", botw},
+        {"graphicPacks/Splatoon/Resolution/rules.txt", "[Definition]\ntitleIds = 0005000010176900\n"},
+    });
+    {
+        std::ofstream out(zip, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+    fs::path user2 = root / "user2";
+    expect(mods::import_cemu_packs(user2, zip, rep, err), "import from a zip: " + err);
+    expect(rep.imported.size() == 2 && rep.skipped_other_games == 0, "zip: BotW packs only, other games never unpacked");
+    expect(fs::exists(user2 / "mods" / "Graphics" / "x_ps.txt") && fs::exists(user2 / "mods" / "RemoveFog" / "rules.txt"), "zip: files copied");
+    expect(!fs::exists(user2 / "mods" / ".cemu_import_tmp"), "zip: temporary folder removed");
+
+    // Nothing for BotW in there.
+    fs::path other = root / "other";
+    write_text(other / "Splatoon" / "Resolution" / "rules.txt", "[Definition]\ntitleIds = 0005000010176900\n");
+    expect(!mods::import_cemu_packs(root / "user3", other, rep, err) && !err.empty(), "a folder without BotW packs is reported");
+}
+
 }  // namespace
 
 int main() {
@@ -269,6 +366,7 @@ int main() {
     test_mods(fs::temp_directory_path() / "launcher_data_test");
     test_sha1_and_dumps(fs::temp_directory_path() / "launcher_dump_test");
     test_setup_wizard(fs::temp_directory_path() / "launcher_setup_test");
+    test_cemu_import(fs::temp_directory_path() / "launcher_cemu_import_test");
     if (g_fails) {
         std::cerr << g_fails << " failed\n";
         return 1;

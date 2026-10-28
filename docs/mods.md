@@ -125,12 +125,13 @@ overwriteHeight = floor($shadowScale * 1024)
 
 ## Memory, Data, and Entry-Point Patches (`patches.txt` / `patch_*.txt`)
 
-Mods can include `patches.txt` or `patch_*.txt` in Cemu format (`[BotW_...]` sections with
-`moduleMatches = 0x6fd41a61` for v1.5.0 / v208):
+Mods can include `patches.txt`, `patch_*.txt` or `patch_*.asm` in Cemu format (`[BotW_...]`
+sections with `moduleMatches = 0x6267BFD0`, the checksum Cemu uses for v1.5.0 / v208;
+`0x6fd41a61` is accepted too):
 
 ```ini
 [BotW_CustomValues]
-moduleMatches = 0x6fd41a61
+moduleMatches = 0x6267BFD0
 
 _customSpeed = 0x10500100
 0x10500100 = .float ($speedMult * 1.5)
@@ -192,6 +193,23 @@ BotWRecomp.exe --no-mods
 ```
 
 Skips loading mods for that session without modifying `mods.ini`.
+
+## Cemu community graphic packs
+
+The packs from the Cemu community (github.com/cemu-project/cemu_graphic_packs) use the same
+`rules.txt`, preset, shader and patch formats. In the launcher's Mods window, **Import Cemu zip...**
+takes the pack archive you downloaded and **Import Cemu folder...** takes Cemu's own `graphicPacks`
+folder. Only packs whose `rules.txt` lists a Breath of the Wild title id are copied into `mods\`,
+and they are copied switched off. **Get packs online** opens the download page.
+
+What can work here:
+
+- Presets, `[TextureRedefine]` rules and custom shaders: supported.
+- Data patches and function-entry patches (`blr`, `nop`, `li r3, N` + `blr`, `b`): supported.
+- Patches in the middle of a function and code caves: skipped. Packs that depend on them, such as
+  FPS++, do not work. 60 fps is built in, so leave the FPS packs off.
+
+None of this has been tested in game yet.
 
 ## Unit tests
 

@@ -979,8 +979,9 @@ bool is_botw_content_dir_name(std::string_view name) {
 bool is_patch_filename(std::string_view fname) {
     std::string low = lower_ascii(fname);
     if (low == "patches.txt") return true;
-    if (low.size() > 6 && low.rfind("patch_", 0) == 0 && low.size() >= 10 &&
-        low.compare(low.size() - 4, 4, ".txt") == 0) {
+    // Community graphic packs ship patch_*.asm; the syntax is the same as patch_*.txt.
+    if (low.size() >= 10 && low.rfind("patch_", 0) == 0 &&
+        (low.compare(low.size() - 4, 4, ".txt") == 0 || low.compare(low.size() - 4, 4, ".asm") == 0)) {
         return true;
     }
     return false;
@@ -1245,8 +1246,9 @@ void append_be64(std::vector<uint8_t>& buf, uint64_t v) {
 bool module_matches_botw(std::string_view val) {
     std::string low = lower_ascii(trim(val));
     if (low.empty()) return true;
-    // BotW v1.5.0 / v208 CRC is 0x6fd41a61
-    return low.find("0x6fd41a61") != std::string::npos || low.find("6fd41a61") != std::string::npos;
+    // 0x6267BFD0 is the checksum Cemu reports for the BotW v208 u-king module, and the one every
+    // community graphic pack lists. 0x6fd41a61 is what this port documented before; keep accepting it.
+    return low.find("6267bfd0") != std::string::npos || low.find("6fd41a61") != std::string::npos;
 }
 
 bool parse_and_encode_patch_rhs(uint32_t addr, std::string_view rhs_raw,

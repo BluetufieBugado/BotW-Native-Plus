@@ -82,7 +82,8 @@ bool inflate_raw(const uint8_t* in, uint32_t in_n, std::vector<uint8_t>& out, st
 
 }  // namespace
 
-bool unzip_to(const std::filesystem::path& zip, const std::filesystem::path& dest, std::string& err) {
+bool unzip_to(const std::filesystem::path& zip, const std::filesystem::path& dest, std::string& err,
+              const std::function<bool(const std::string&)>& keep) {
     std::error_code ec;
     auto sz = std::filesystem::file_size(zip, ec);
     if (ec) {
@@ -137,7 +138,7 @@ bool unzip_to(const std::filesystem::path& zip, const std::filesystem::path& des
         err = "zip central directory is truncated";
         return false;
     }
-    if (entries > kMaxFiles) {
+    if (entries > kMaxFiles && !keep) {
         err = "zip has too many files";
         return false;
     }
@@ -148,6 +149,7 @@ bool unzip_to(const std::filesystem::path& zip, const std::filesystem::path& des
     }
     size_t p = cd_off;
     uint64_t total_uncomp = 0;
+    int kept_files = 0;
     for (uint16_t n = 0; n < entries; n++) {
         if (p + 46 > static_cast<size_t>(sz) || r32(data.data() + p) != 0x02014b50) {
             err = "zip central directory is corrupt";
@@ -167,6 +169,7 @@ bool unzip_to(const std::filesystem::path& zip, const std::filesystem::path& des
         }
         std::string name(reinterpret_cast<char*>(data.data() + p + 46), namelen);
         p += 46 + namelen + extralen + commentlen;
+        if (keep && !keep(name)) continue;
         if (comp == 0xFFFFFFFFu || uncomp == 0xFFFFFFFFu || local == 0xFFFFFFFFu) {
             err = "zip64 entries are not supported";
             return false;
@@ -193,6 +196,10 @@ bool unzip_to(const std::filesystem::path& zip, const std::filesystem::path& des
         }
         if (uncomp > kMaxFileBytes) {
             err = "a file inside the zip is larger than 256 MB";
+            return false;
+        }
+        if (keep && ++kept_files > kMaxFiles) {
+            err = "zip has too many files";
             return false;
         }
         total_uncomp += uncomp;

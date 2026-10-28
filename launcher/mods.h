@@ -70,7 +70,22 @@ bool install_mod(const std::filesystem::path& user_root,
                  std::string& installed_folder_out,
                  std::string& err);
 
+struct ImportReport {
+    std::vector<std::string> imported;  // folders written under mods\, all left switched off
+    int skipped_other_games = 0;        // rules.txt found, but the pack is for another game
+    int failed = 0;                     // packs that could not be copied
+    int with_patches = 0;               // imported packs that ship patch files
+};
+
+// Imports the Breath of the Wild graphic packs from the Cemu community: src is a .zip of packs or a
+// folder that holds them (for example Cemu's graphicPacks folder). A pack is a folder with a rules.txt
+// whose titleIds list a BotW title. Packs are copied into <user_root>/mods and left switched off. A mod
+// you installed yourself under the same name is never overwritten.
+bool import_cemu_packs(const std::filesystem::path& user_root, const std::filesystem::path& src,
+                       ImportReport& report, std::string& err);
+
 // Exposed for tests.
 void parse_rules(const std::string& text, Mod& out);
+bool rules_target_botw(const std::string& rules_text);
 
 }  // namespace mods

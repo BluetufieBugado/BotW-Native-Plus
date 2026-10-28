@@ -132,7 +132,7 @@ bool is_botw_content_subdir(std::string_view name) {
 bool is_patch_filename(std::string_view fname) {
     std::string l = lower(std::string(fname));
     if (l == "patches.txt") return true;
-    if (l.size() > 10 && l.rfind("patch_", 0) == 0 && l.substr(l.size() - 4) == ".txt") return true;
+    if (l.size() > 10 && l.rfind("patch_", 0) == 0 && (l.substr(l.size() - 4) == ".txt" || l.substr(l.size() - 4) == ".asm")) return true;
     return false;
 }
 
@@ -740,6 +740,187 @@ bool install_mod(const std::filesystem::path& user_root,
         st.list.push_back(std::move(m));
     }
     return save(user_root, st, st.has_order, err);
+}
+
+bool rules_target_botw(const std::string& rules_text) {
+    std::istringstream in(lower(rules_text));
+    std::string line;
+    while (std::getline(in, line)) {
+        std::string t = trim(line);
+        if (t.rfind("titleids", 0) != 0) continue;
+        // Game, update and DLC ids of the Japanese, US and European releases share these tails.
+        if (t.find("101c9300") != std::string::npos || t.find("101c9400") != std::string::npos ||
+            t.find("101c9500") != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
+namespace {
+
+constexpr const char* kPackMarker = ".cemu_pack";  // tells our own imported folders from the user's mods
+
+std::string safe_folder_name(std::string s) {
+    for (char& c : s) {
+        unsigned char u = static_cast<unsigned char>(c);
+        if (u < 32 || c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+    }
+    while (!s.empty() && (s.front() == '.' || s.front() == ' ')) s.erase(s.begin());
+    while (!s.empty() && (s.back() == '.' || s.back() == ' ')) s.pop_back();
+    return s;
+}
+
+bool has_patch_file(const std::filesystem::path& dir) {
+    std::error_code ec;
+    for (auto it = std::filesystem::recursive_directory_iterator(dir, ec);
+         !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        std::error_code e2;
+        if (it->is_regular_file(e2) && is_patch_filename(path_to_utf8(it->path().filename()))) return true;
+    }
+    return false;
+}
+
+struct PackImporter {
+    std::filesystem::path root, dest_root;
+    ImportReport* rep = nullptr;
+    std::set<std::string> used;  // lowercase folder names taken during this run
+
+    bool name_is_free(const std::string& n) const {
+        if (n.empty() || used.count(lower(n))) return false;
+        std::error_code ec;
+        std::filesystem::path d = dest_root / utf8_to_path(n);
+        // Free if nothing is there, or if it is a pack we imported earlier (then it gets refreshed).
+        return !std::filesystem::exists(d, ec) || std::filesystem::exists(d / kPackMarker, ec);
+    }
+
+    void import_pack(const std::filesystem::path& dir) {
+        std::string base = safe_folder_name(path_to_utf8(dir.filename()));
+        if (base.empty()) base = "CemuPack";
+        std::vector<std::string> candidates{base};
+        if (dir.parent_path() != root) {
+            std::string parent = safe_folder_name(path_to_utf8(dir.parent_path().filename()));
+            if (!parent.empty()) candidates.push_back(parent + "_" + base);
+        }
+        candidates.push_back("Cemu_" + base);
+        for (int n = 2; n < 100; ++n) candidates.push_back(base + "_" + std::to_string(n));
+        std::string chosen;
+        for (const std::string& c : candidates) {
+            if (name_is_free(c)) {
+                chosen = c;
+                break;
+            }
+        }
+        if (chosen.empty()) {
+            rep->failed++;
+            return;
+        }
+        std::error_code ec;
+        std::filesystem::path dest = dest_root / utf8_to_path(chosen);
+        std::filesystem::remove_all(dest, ec);
+        std::filesystem::create_directories(dest, ec);
+        std::filesystem::copy(dir, dest, std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            std::filesystem::remove_all(dest, ec);
+            rep->failed++;
+            return;
+        }
+        std::ofstream(dest / kPackMarker, std::ios::binary) << "imported from the Cemu community graphic packs\n";
+        used.insert(lower(chosen));
+        rep->imported.push_back(chosen);
+        if (has_patch_file(dest)) rep->with_patches++;
+    }
+
+    void scan(const std::filesystem::path& dir, int depth) {
+        std::string rules;
+        if (read_text(dir / "rules.txt", rules)) {
+            if (rules_target_botw(rules)) import_pack(dir);
+            else rep->skipped_other_games++;
+            return;  // a pack's own subfolders are part of the pack
+        }
+        if (depth >= 6) return;
+        std::vector<std::filesystem::path> subs;
+        std::error_code ec;
+        for (auto it = std::filesystem::directory_iterator(dir, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+            std::error_code e2;
+            if (!it->is_directory(e2)) continue;
+            std::string name = path_to_utf8(it->path().filename());
+            if (!name.empty() && name[0] == '.') continue;
+            subs.push_back(it->path());
+        }
+        std::sort(subs.begin(), subs.end());  // same folder names resolve the same way every time
+        for (const auto& s : subs) scan(s, depth + 1);
+    }
+};
+
+}  // namespace
+
+bool import_cemu_packs(const std::filesystem::path& user_root, const std::filesystem::path& src,
+                       ImportReport& report, std::string& err) {
+    report = ImportReport{};
+    if (user_root.empty()) {
+        err = "Set the user data folder in Settings first.";
+        return false;
+    }
+    std::error_code ec;
+    if (!std::filesystem::exists(src, ec)) {
+        err = "The selected path does not exist.";
+        return false;
+    }
+    std::filesystem::path mdir = mods_dir(user_root);
+    std::filesystem::create_directories(mdir, ec);
+    if (ec) {
+        err = "Could not create the mods folder: " + ec.message();
+        return false;
+    }
+
+    std::filesystem::path root = src, tmp;
+    bool from_zip = false;
+    if (std::filesystem::is_regular_file(src, ec)) {
+        if (lower(path_to_utf8(src.extension())) != ".zip") {
+            err = "Choose a .zip of Cemu graphic packs, or a folder that holds them.";
+            return false;
+        }
+        from_zip = true;
+        tmp = mdir / ".cemu_import_tmp";
+        std::filesystem::remove_all(tmp, ec);
+        // The community archive covers every game; only unpack what is named for Breath of the Wild.
+        auto keep = [](const std::string& name) {
+            std::string l = lower(name);
+            return l.find("breathofthewild") != std::string::npos || l.find("breath of the wild") != std::string::npos ||
+                   l.find("botw") != std::string::npos;
+        };
+        std::string zerr;
+        if (!unzip_to(src, tmp, zerr, keep)) {
+            std::filesystem::remove_all(tmp, ec);
+            err = "Could not read the archive: " + zerr + ". Extract it with Windows and use the folder option instead.";
+            return false;
+        }
+        root = tmp;
+    } else if (std::filesystem::is_directory(src, ec)) {
+        std::string s = lower(path_to_utf8(std::filesystem::weakly_canonical(src, ec)));
+        std::string m = lower(path_to_utf8(std::filesystem::weakly_canonical(mdir, ec)));
+        if (s == m || (s.rfind(m, 0) == 0 && s.size() > m.size() && (s[m.size()] == '/' || s[m.size()] == '\\'))) {
+            err = "That folder is already inside the mods folder. Choose the folder where you keep the Cemu packs.";
+            return false;
+        }
+    } else {
+        err = "Choose a .zip of Cemu graphic packs, or a folder that holds them.";
+        return false;
+    }
+
+    PackImporter imp;
+    imp.root = root;
+    imp.dest_root = mdir;
+    imp.rep = &report;
+    imp.scan(root, 0);
+    if (from_zip) std::filesystem::remove_all(tmp, ec);
+
+    if (report.imported.empty()) {
+        err = "No Breath of the Wild graphic packs were found there.";
+        if (report.skipped_other_games > 0) err += " " + std::to_string(report.skipped_other_games) + " pack(s) for other games were ignored.";
+        return false;
+    }
+    return true;
 }
 
 }  // namespace mods
