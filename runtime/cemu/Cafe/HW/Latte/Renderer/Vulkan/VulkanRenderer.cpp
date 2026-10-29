@@ -217,6 +217,27 @@ void VulkanRenderer::DetermineVendor()
 
 	cemuLog_log(LogType::Force, "Using GPU: {}", properties.properties.deviceName);
 
+	// Low-memory texture cache: integrated GPU (shares system RAM) on a PC with 6 GB of RAM or less.
+	// BOTW_LOWMEM=1 forces it on, BOTW_LOWMEM=0 forces it off.
+	{
+		extern bool g_latteLowMemoryTextureCache;
+		bool lowMem = false;
+		uint64 totalRamMB = 0;
+		#if BOOST_OS_WINDOWS
+		MEMORYSTATUSEX memStatus{};
+		memStatus.dwLength = sizeof(memStatus);
+		if (GlobalMemoryStatusEx(&memStatus))
+			totalRamMB = memStatus.ullTotalPhys / (1024 * 1024);
+		#endif
+		if (const char* env = getenv("BOTW_LOWMEM"))
+			lowMem = atoi(env) != 0;
+		else
+			lowMem = properties.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && totalRamMB != 0 && totalRamMB <= 6 * 1024;
+		g_latteLowMemoryTextureCache = lowMem;
+		if (lowMem)
+			cemuLog_log(LogType::Force, "Low-memory texture cache: on ({} MB RAM, integrated GPU). Set BOTW_LOWMEM=0 to turn it off", totalRamMB);
+	}
+
 	if (m_featureControl.deviceExtensions.driver_properties)
 	{
 		cemuLog_log(LogType::Force, "Driver version: {}", driverProperties.driverInfo);
