@@ -72,7 +72,27 @@ Import, Switch to, Delete, and Migrate are disabled while `BotWRecomp.exe` runs.
 
 ## Mods
 
-Each mod is a folder in `<user data>\mods\`:
+The Mods window lists every mod in `<user data>\mods\`. Tick a mod to turn it on. Select a mod to
+see its name, version, file counts, description and its settings:
+
+* **Settings.** One drop-down for each preset category in the mod's `rules.txt`, such as Draw
+  Distance or Texture Quality. Picking one can add or remove other drop-downs, because a preset can
+  have a `condition` that looks at earlier choices (for example, a dependent category shown only at
+  2x draw distance). A mod that is off still shows its settings, with a note that it must be ticked
+  to take effect. **Reset to defaults** puts every drop-down back to the pack's default.
+* **Move up / Move down.** Changes load order. Later mods win file conflicts.
+* **Add archive / Add folder** install a mod you downloaded (`.zip` or folder).
+* **Import Cemu zip / Import Cemu folder** copy the Breath of the Wild packs from Cemu's
+  community collection. They are copied switched off. **Get packs online** opens the download page.
+* **Save** writes `mods.ini` and closes. **Cancel** discards ticks, picks and order changes.
+
+Settings and order take effect the next time the game starts.
+
+`rules.txt` is optional and uses the Cemu graphic pack layout. The launcher reads `[Definition]`
+(name, description, version, path), `[Default]` and top-level `$variables`, and every `[Preset]`
+(name, category, default, condition and `$variable` values). Expressions use the same evaluator as
+the game (`runtime/src/coreinit/mod_expr.h`). A mod with neither `content\` nor `aoc\` is listed with
+a note that it changes nothing.
 
 ```
 mods\
@@ -81,18 +101,6 @@ mods\
     content\       files that replace game content
     aoc\           files that replace DLC content
 ```
-
-`rules.txt` is optional and uses the Cemu graphic pack layout. Only `[Definition]` is read:
-
-```
-[Definition]
-name = Longer draw distance
-description = Pushes object and grass fade-out further away.
-version = 2
-```
-
-Without it the folder name is shown. A mod with neither `content\` nor `aoc\` is listed with
-a note that it changes nothing.
 
 State is in `<user data>\mods.ini`:
 
@@ -104,15 +112,19 @@ HudScale=0
 
 [Order]
 order=CameraTweaks,DrawDistance,HudScale
+
+[Presets]
+DrawDistance:Draw Distance=Far (2x)
 ```
 
 * A folder missing from `[Enabled]` is off.
 * Mods load in list order. When two change the same file, the later one wins.
-* Without `[Order]` the order is alphabetical by folder name. Move up and Move down write it.
+* Without `[Order]` the order is alphabetical by folder name.
+* A preset is written only when it differs from the pack's default, so `mods.ini` stays short.
 * Other sections, comments, and keys for folders that are gone are kept.
 
-The checkbox in front of each mod turns it on or off and saves at once. **Launch without
-mods** keeps the list as it is and passes `--no-mods` for every launch until it is unchecked.
+**Launch without mods** keeps the list as it is and passes `--no-mods` for every launch until it
+is unchecked.
 
 ## Log
 
@@ -143,10 +155,11 @@ High contrast uses the system colors. The window handles per-monitor DPI changes
 
 ## Tests
 
-`launcher/launcher_data_test.cpp` checks the `meta.xml` and TGA readers and `mods.ini`
-handling. It has no Win32 code:
+`launcher/launcher_data_test.cpp` checks the `meta.xml` and TGA readers, `mods.ini` handling,
+`rules.txt` presets and conditions, and the Cemu import. It has no Win32 code:
 
 ```bash
-g++ -std=c++20 -Ilauncher launcher/launcher_data_test.cpp launcher/game_info.cpp launcher/mods.cpp -o launcher_data_test
+g++ -std=c++20 -Ilauncher -Iruntime/src launcher/launcher_data_test.cpp launcher/game_info.cpp \
+  launcher/mods.cpp launcher/unzip.cpp launcher/setup_wizard.cpp -lz -o launcher_data_test
 ./launcher_data_test
 ```
