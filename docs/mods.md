@@ -66,6 +66,11 @@ mods...**):
   `shaders`, `texture rules`) and lists which enabled mods the selected mod overrides or is
   overridden by.
 
+## Launcher Mods window
+
+The **Mods** window in `BotWLauncher.exe` shows each mod's settings as drop-downs, one per preset
+category, with the same conditions the game uses. See [launcher.md](launcher.md#mods).
+
 ## In-game F1 Mods tab
 
 Press **F1** in game and switch to the **Mods** tab:
@@ -219,7 +224,8 @@ cmake --build build --target BotWModTests
 ./build/BotWModTests
 ```
 
-Covers `mods.ini` and `rules.txt` parsing, `[Preset]` categories and conditions, expression
+Covers `mods.ini` and `rules.txt` parsing, `[Preset]` categories and conditions (including the
+launcher's copy of the same rules, checked against the same pack), expression
 evaluation, `[TextureRedefine]`, `patches.txt` data and function-entry overrides, custom shader
 lookup, direct `Actor/` layouts and nested folder unwrapping, UTF-8 filenames, `move_order`,
 `reload`, and `.zip` / folder installation.

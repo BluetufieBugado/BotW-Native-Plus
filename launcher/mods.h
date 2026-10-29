@@ -15,14 +15,25 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace mods {
 
+// One [Preset] block of a rules.txt, as declared.
+struct PresetOption {
+    std::string name;
+    std::string category;                                      // empty for single-category packs
+    bool is_default = false;                                   // default = 1
+    std::string condition;                                     // empty: always offered
+    std::vector<std::pair<std::string, std::string>> vars;     // "$name" = expression, in order
+};
+
+// A group of presets the person picks one of (Cemu shows each as a drop-down).
 struct PresetCategory {
     std::string category;               // empty for single-category graphic packs
-    std::vector<std::string> options;   // preset names in declaration order
-    std::string default_option;         // option marked default = 1, or options.front()
+    std::vector<std::string> options;   // every preset name in declaration order, conditions ignored
+    std::string default_option;         // first option marked default = 1, or options.front()
     std::string active;                 // currently selected option
 };
 
@@ -31,6 +42,7 @@ struct Mod {
     std::string name;         // rules.txt [Definition] name, else the folder name
     std::string description;  // rules.txt description, may be empty
     std::string version;      // rules.txt version, may be empty
+    std::string path;         // rules.txt path, how Cemu files a pack in its tree, may be empty
     bool has_rules = false;
     bool has_content = false;
     bool has_aoc = false;
@@ -45,6 +57,9 @@ struct Mod {
     std::vector<std::string> overrides_mods;
     std::vector<std::string> overridden_by_mods;
     std::vector<PresetCategory> presets;
+    // What rules.txt declared, kept so the launcher can work out which presets apply.
+    std::vector<std::pair<std::string, std::string>> default_vars;  // [Default] and top-level $vars
+    std::vector<PresetOption> preset_defs;                          // every [Preset], in file order
 };
 
 struct State {
@@ -83,6 +98,24 @@ struct ImportReport {
 // you installed yourself under the same name is never overwritten.
 bool import_cemu_packs(const std::filesystem::path& user_root, const std::filesystem::path& src,
                        ImportReport& report, std::string& err);
+
+// One drop-down of a mod's settings panel.
+struct PresetChoice {
+    size_t category_index = 0;          // index into Mod::presets, to store the pick in
+    std::string label;                  // category name, or "Preset" when the pack has no categories
+    std::vector<std::string> options;   // offered right now (conditions applied), declaration order
+    std::string active;                 // option in effect (what the game will use)
+};
+
+// The settings a mod offers with its current picks, worked out like the game does when it loads the
+// pack: a preset's `condition` is checked against the $variables set by the categories before it,
+// options whose condition is false are left out, and a category with no option left is hidden. A pick
+// that is no longer offered falls back to the default, then to the first option. Picking in one
+// category can therefore add or remove others, so call this again after every change.
+std::vector<PresetChoice> visible_presets(const Mod& mod);
+
+// Puts every category of the mod back to its default option.
+void reset_presets(Mod& mod);
 
 // Exposed for tests.
 void parse_rules(const std::string& text, Mod& out);

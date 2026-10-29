@@ -358,6 +358,166 @@ void test_cemu_import(const fs::path& root) {
     expect(!mods::import_cemu_packs(root / "user3", other, rep, err) && !err.empty(), "a folder without BotW packs is reported");
 }
 
+
+// What a Cemu-style graphic pack offers in its settings: categories, conditions between them, defaults.
+const char* kVisualPack =
+    "[Definition]\n"
+    "titleIds = 00050000101c9400,00050000101c9500,00050000101c9300\n"
+    "name = \"Visual Tweaks\"\n"
+    "path = \"The Legend of Zelda: Breath of the Wild/Graphics/Visual Tweaks\"\n"
+    "description = First line.\\nSecond line # still text\n"
+    "version = 7\n"
+    "\n"
+    "[Default]\n"
+    "$drawDistance = 1.0\n"
+    "$texQuality = 2\n"
+    "\n"
+    "[Preset]\nname = Default (1x)\ncategory = Draw Distance\ndefault = 1\n$drawDistance = 1.0\n"
+    "[Preset]\nname = Far (2x)\ncategory = Draw Distance\n$drawDistance = 2.0\n"
+    "[Preset]\nname = Very far (4x)\ncategory = Draw Distance\n$drawDistance = 4.0   # inline comment\n"
+    "\n"
+    "[Preset]\nname = Normal\ncategory = Texture Quality\ndefault = 1\n$texQuality = 2\n"
+    "[Preset]\nname = High\ncategory = Texture Quality\n$texQuality = 3\n"
+    "[Preset]\nname = Extreme\ncategory = Texture Quality\ncondition = $drawDistance < 4\n$texQuality = 4\n"
+    "\n"
+    "[Preset]\nname = Cull hints on\ncategory = Distant objects\ncondition = $drawDistance >= 2\ndefault = 1\n$cull = 1\n"
+    "[Preset]\nname = Cull hints off\ncategory = Distant objects\ncondition = $drawDistance >= 2\n$cull = 0\n";
+
+const mods::PresetChoice* find_choice(const std::vector<mods::PresetChoice>& v, const std::string& label) {
+    for (const auto& c : v)
+        if (c.label == label) return &c;
+    return nullptr;
+}
+
+void pick(mods::Mod& m, const std::string& category, const std::string& option) {
+    for (auto& pc : m.presets)
+        if (pc.category == category) pc.active = option;
+}
+
+void test_presets(const fs::path& root) {
+    fs::remove_all(root);
+    write_text(root / "mods" / "Visual Tweaks" / "rules.txt", kVisualPack);
+    write_text(root / "mods" / "Visual Tweaks" / "content" / "Pack" / "x.pack", "x");
+    write_text(root / "mods" / "Single" / "rules.txt",
+               "[Definition]\nname = Single\n"
+               "[Preset]\nname = A\ndefault = 1\n[Preset]\nname = B\ndefault = 1\n[Preset]\nname = C\n");
+    write_text(root / "mods" / "Plain" / "rules.txt", "[Definition]\nname = Plain\n");
+    write_text(root / "mods" / "Broken" / "rules.txt",
+               "[Definition]\nname = Broken\n"
+               "[Preset]\nname = Always\ncategory = Q\n"
+               "[Preset]\nname = Never\ncategory = Q\ncondition = $$$ nonsense\n");
+
+    auto st = mods::load(root);
+    mods::Mod* vt = nullptr;
+    mods::Mod* single = nullptr;
+    mods::Mod* plain = nullptr;
+    mods::Mod* broken = nullptr;
+    for (auto& m : st.list) {
+        if (m.folder == "Visual Tweaks") vt = &m;
+        else if (m.folder == "Single") single = &m;
+        else if (m.folder == "Plain") plain = &m;
+        else if (m.folder == "Broken") broken = &m;
+    }
+    expect(vt && single && plain && broken, "presets: all four test mods found");
+    if (!(vt && single && plain && broken)) return;
+
+    // Parsing.
+    expect(vt->name == "Visual Tweaks" && vt->version == "7", "presets: name and version");
+    expect(vt->path == "The Legend of Zelda: Breath of the Wild/Graphics/Visual Tweaks", "presets: path: " + vt->path);
+    expect(vt->description == "First line.\nSecond line # still text", "presets: description keeps its line break: " + vt->description);
+    expect(vt->preset_defs.size() == 8 && vt->presets.size() == 3, "presets: 8 presets in 3 categories");
+    expect(vt->default_vars.size() == 2, "presets: [Default] variables kept");
+    expect(vt->presets[0].category == "Draw Distance" && vt->presets[0].options.size() == 3, "presets: category order and options");
+    expect(vt->presets[0].default_option == "Default (1x)" && vt->presets[1].default_option == "Normal", "presets: defaults");
+    expect(vt->preset_defs[2].vars.size() == 1 && vt->preset_defs[2].vars[0].second == "4.0", "presets: inline comment stripped from a value");
+
+    // Default view: Distant objects needs drawDistance >= 2, so it is hidden.
+    auto v = mods::visible_presets(*vt);
+    expect(v.size() == 2, "presets: two drop-downs at the defaults");
+    const auto* tq = find_choice(v, "Texture Quality");
+    expect(tq && tq->options.size() == 3 && tq->active == "Normal", "presets: all texture options offered at 1x");
+    expect(!find_choice(v, "Distant objects"), "presets: dependent category hidden at 1x");
+
+    // Picking a farther draw distance reveals the dependent category and uses its default.
+    pick(*vt, "Draw Distance", "Far (2x)");
+    v = mods::visible_presets(*vt);
+    const auto* far_cat = find_choice(v, "Distant objects");
+    expect(v.size() == 3 && far_cat && far_cat->options.size() == 2 && far_cat->active == "Cull hints on", "presets: dependent category appears at 2x");
+    tq = find_choice(v, "Texture Quality");
+    expect(tq && tq->options.size() == 3, "presets: Extreme still offered at 2x");
+
+    // At 4x, Extreme is no longer offered and a pick of it falls back to the default.
+    pick(*vt, "Texture Quality", "Extreme");
+    v = mods::visible_presets(*vt);
+    tq = find_choice(v, "Texture Quality");
+    expect(tq && tq->active == "Extreme", "presets: Extreme in effect at 2x");
+    pick(*vt, "Draw Distance", "Very far (4x)");
+    v = mods::visible_presets(*vt);
+    tq = find_choice(v, "Texture Quality");
+    expect(tq && tq->options.size() == 2 && tq->active == "Normal", "presets: Extreme dropped and pick falls back at 4x");
+    expect(vt->presets[1].active == "Extreme", "presets: the stored pick is not overwritten by the fallback");
+    pick(*vt, "Draw Distance", "Default (1x)");
+    tq = find_choice(mods::visible_presets(*vt), "Texture Quality");
+    expect(tq && tq->active == "Extreme", "presets: the pick comes back when it is offered again");
+
+    // Reset.
+    pick(*vt, "Draw Distance", "Far (2x)");
+    mods::reset_presets(*vt);
+    expect(vt->presets[0].active == "Default (1x)" && vt->presets[1].active == "Normal", "presets: reset to defaults");
+
+    // First default = 1 wins, and a pack without categories is labelled Preset.
+    expect(single->presets.size() == 1 && single->presets[0].default_option == "A", "presets: first default wins");
+    v = mods::visible_presets(*single);
+    expect(v.size() == 1 && v[0].label == "Preset" && v[0].options.size() == 3 && v[0].active == "A", "presets: uncategorised pack");
+
+    // No presets at all, and a condition that does not parse.
+    expect(mods::visible_presets(*plain).empty(), "presets: a pack without presets has no settings");
+    v = mods::visible_presets(*broken);
+    expect(v.size() == 1 && v[0].options.size() == 1 && v[0].options[0] == "Always", "presets: an unreadable condition hides that option");
+
+    // Save, read back, and the ini value is matched without regard to case.
+    vt->enabled = true;
+    pick(*vt, "Draw Distance", "Far (2x)");
+    pick(*vt, "Texture Quality", "High");
+    pick(*single, "", "C");
+    std::string err;
+    expect(mods::save(root, st, false, err), "presets: save works: " + err);
+    std::string ini = read_text(root / "mods.ini");
+    expect(ini.find("Visual Tweaks:Draw Distance=Far (2x)") != std::string::npos, "presets: category key written");
+    expect(ini.find("Single=C") != std::string::npos, "presets: uncategorised key written");
+    auto again = mods::load(root);
+    for (auto& m : again.list) {
+        if (m.folder != "Visual Tweaks") continue;
+        expect(m.enabled && m.presets[0].active == "Far (2x)" && m.presets[1].active == "High", "presets: picks read back");
+        auto vv = mods::visible_presets(m);
+        expect(vv.size() == 3 && find_choice(vv, "Distant objects"), "presets: dependent category present after reload");
+    }
+    write_text(root / "mods.ini", "[Presets]\nVISUAL TWEAKS:draw distance = very FAR (4x)\n");
+    again = mods::load(root);
+    for (auto& m : again.list)
+        if (m.folder == "Visual Tweaks") expect(m.presets[0].active == "Very far (4x)", "presets: ini value matched without case: " + m.presets[0].active);
+
+    // mods.ini stays short: picks that are just the default are not written, and no empty [Presets] appears.
+    fs::remove(root / "mods.ini");
+    auto fresh = mods::load(root);
+    expect(mods::save(root, fresh, false, err), "presets: save with defaults: " + err);
+    ini = read_text(root / "mods.ini");
+    expect(ini.find("[Presets]") == std::string::npos && ini.find("Draw Distance") == std::string::npos, "presets: defaults are not written");
+    // A pick put back to the default replaces the line that was there, instead of leaving the old pick.
+    for (auto& m : fresh.list)
+        if (m.folder == "Visual Tweaks") pick(m, "Draw Distance", "Far (2x)");
+    expect(mods::save(root, fresh, false, err) && read_text(root / "mods.ini").find("Visual Tweaks:Draw Distance=Far (2x)") != std::string::npos,
+           "presets: non-default pick written");
+    for (auto& m : fresh.list)
+        if (m.folder == "Visual Tweaks") pick(m, "Draw Distance", "Default (1x)");
+    expect(mods::save(root, fresh, false, err), "presets: save back to default");
+    ini = read_text(root / "mods.ini");
+    expect(ini.find("Draw Distance=Default (1x)") != std::string::npos && ini.find("Far (2x)") == std::string::npos,
+           "presets: a pick put back to the default replaces the old line");
+
+    fs::remove_all(root);
+}
+
 }  // namespace
 
 int main() {
@@ -367,6 +527,7 @@ int main() {
     test_sha1_and_dumps(fs::temp_directory_path() / "launcher_dump_test");
     test_setup_wizard(fs::temp_directory_path() / "launcher_setup_test");
     test_cemu_import(fs::temp_directory_path() / "launcher_cemu_import_test");
+    test_presets(fs::temp_directory_path() / "launcher_presets_test");
     if (g_fails) {
         std::cerr << g_fails << " failed\n";
         return 1;

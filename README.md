@@ -15,7 +15,7 @@ On-screen FPS counter ✔
 ## What I still plan to add:
 
 
-A mod menu similar to the one found in Cemu ⚙
+A mod menu similar to the one found in Cemu, with per-mod settings in the launcher ✔
 
 A way to improve performance on ultra-low-end devices ⏩
 
