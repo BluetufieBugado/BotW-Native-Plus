@@ -198,6 +198,22 @@ int main(int argc, char** argv) {
         if (auto fn = (TimeBeginPeriodFn)GetProcAddress(winmm, "timeBeginPeriod")) fn(1);
     }
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+    // Windows 10 1709+ can mark a process for execution-speed throttling (EcoQoS: efficiency cores,
+    // low clocks), most often on battery saver or when the window loses focus. Opt out for the whole
+    // process. SetProcessInformation is looked up at run time so the build needs no newer headers
+    // and older Windows versions simply skip it.
+    {
+        struct PowerThrottling {  // PROCESS_POWER_THROTTLING_STATE
+            ULONG version, controlMask, stateMask;
+        };
+        using SetProcessInformationFn = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+        if (HMODULE k32 = GetModuleHandleA("kernel32.dll")) {
+            if (auto fn = (SetProcessInformationFn)(void*)GetProcAddress(k32, "SetProcessInformation")) {
+                PowerThrottling pt{1 /*CURRENT_VERSION*/, 1 /*EXECUTION_SPEED*/, 0 /*never throttle*/};
+                fn(GetCurrentProcess(), 4 /*ProcessPowerThrottling*/, &pt, sizeof pt);
+            }
+        }
+    }
     // Before mem::init, so the first guest touch can commit its page.
     AddVectoredExceptionHandler(1, on_vectored_exception);
 #else
