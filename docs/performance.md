@@ -74,3 +74,20 @@ README).
   audio. A 2-core CPU is oversubscribed and is the usual reason resolution has no effect.
 - **`--fps 30`** gives the game's original pacing. It does not make a slow machine faster, but if
   you can hold 30 and not 60 it gives steadier frame times than a 60 target that keeps missing.
+
+## 4. Low RAM (4 GB) and integrated GPUs
+
+An integrated GPU has no memory of its own: its textures live in the same RAM as the game (about
+1 GB resident) and Windows. Cemu's texture cache keeps a texture that is no longer used for two
+minutes and 2000 frames, and only frees more when a GPU allocation *fails*, which on a shared heap
+happens after the PC is already paging. On a 4 GB machine that shows up as multi-second stalls
+(the log shows even a one-line `LOG` taking seconds) and sometimes a crash.
+
+On an integrated GPU in a PC with 6 GB of RAM or less, unused RAM-only textures are now dropped
+after 20 s and 200 frames instead. They are rebuilt from guest memory if they are needed again, which
+costs a little CPU when you return to an area. `runtime.log` says
+`Low-memory texture cache: on (...)` when it is active.
+
+- `BOTW_LOWMEM=0` turns it off, `BOTW_LOWMEM=1` forces it on (set it in the shell before starting).
+- Also set a fixed pagefile (initial 4096 MB, maximum 8192 MB) and close other programs; the game
+  itself needs 0.8 to 1.2 GB resident.

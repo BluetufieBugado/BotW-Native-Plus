@@ -6,6 +6,12 @@
 
 std::unordered_set<LatteTexture*> g_allTextures;
 
+// Set by the Vulkan renderer for an integrated GPU on a PC with little RAM. The GPU then allocates
+// its textures out of the same physical RAM that the game and Windows use, so keeping unused
+// textures for two minutes ends up as paging stalls or an out-of-memory crash. In this mode
+// RAM-only textures are dropped much sooner. They are rebuilt from guest memory if needed again.
+bool g_latteLowMemoryTextureCache = false;
+
 void LatteTC_Init()
 {
 	cemu_assert_debug(g_allTextures.empty());
@@ -367,7 +373,9 @@ bool LatteTC_CleanupCheckTexture(LatteTexture* texture, uint32 currentTick)
 	if( !texture->isUpdatedOnGPU )
 	{
 		// RAM-only textures are safe to be deleted since we can always restore them from RAM
-		if( ticksSinceLastAccess >= (120*1000) && framesSinceLastAccess >= 2000 )
+		const uint32 unusedMs = g_latteLowMemoryTextureCache ? (20 * 1000) : (120 * 1000);
+		const uint32 unusedFrames = g_latteLowMemoryTextureCache ? 200 : 2000;
+		if( ticksSinceLastAccess >= unusedMs && framesSinceLastAccess >= unusedFrames )
 		{
 			LatteTexture_Delete(texture);
 			return true;
