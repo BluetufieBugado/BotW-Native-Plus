@@ -15,7 +15,11 @@ On-screen FPS counter ✔
 ## What I still plan to add:
 
 
+<<<<<<< HEAD
 A mod menu similar to the one found in Cemu ⚙
+=======
+A mod menu similar to the one found in Cemu, with per-mod settings in the launcher ✔
+>>>>>>> feature/mod-settings-ui
 
 A way to improve performance on ultra-low-end devices ⏩
 
@@ -133,6 +137,9 @@ The window title is **BotW Recompiled (Windows)**. The first log line is
 
 Mods: put file replacement mods in `%APPDATA%\BotWRecomp\mods` and enable them in `mods.ini`.
 `--no-mods` skips them for one run. See [`docs/mods.md`](docs/mods.md). This is untested in game so far.
+
+Slow even at the lowest resolution? Then the CPU is the limit, not the GPU. See
+[`docs/performance.md`](docs/performance.md): build with `-DBOTW_CPU_ARCH=native`, and use `--bench` to measure.
 
 Useful flags: `--fps 30` for the game's original pace (60 is the default), `--scale 1` for
 1280×720 (`--scale 0.75` renders at 960×540 and `--scale 0.5` at 640×360, for weaker GPUs; the window

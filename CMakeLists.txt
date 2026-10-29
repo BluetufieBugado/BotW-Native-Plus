@@ -32,6 +32,26 @@ if(BOTW_USE_LLD AND NOT MSVC)
   endif()
 endif()
 
+# CPU target for the game code, the runtime and the Latte/Vulkan layer. Empty keeps a portable
+# x86-64 baseline that runs on any 64-bit PC, but then every PowerPC fmadd in the recompiled game
+# is a real call into fma() (runtime/src/cpu.cpp) and every sqrt keeps its errno fallback. A
+# machine-specific target lets the compiler inline vfmadd/vsqrtsd and use movbe for the big-endian
+# loads. `native` is the simplest choice for a build you run yourself. `x86-64-v3` is a portable
+# step up for any CPU from 2013 (Haswell / Zen) on. Do not ship a `native` build to other PCs.
+set(BOTW_CPU_ARCH "" CACHE STRING "Value for -march= (native, x86-64-v3, ...). Empty = portable baseline")
+set(_botw_arch_opts "")
+if(BOTW_CPU_ARCH AND NOT APPLE)
+  include(CheckCXXCompilerFlag)
+  string(MAKE_C_IDENTIFIER "BOTW_HAVE_ARCH_${BOTW_CPU_ARCH}" _botw_arch_var)  # one cache entry per value
+  check_cxx_compiler_flag("-march=${BOTW_CPU_ARCH}" ${_botw_arch_var})
+  if(${_botw_arch_var})
+    set(_botw_arch_opts "-march=${BOTW_CPU_ARCH}")
+    message(STATUS "CPU target: -march=${BOTW_CPU_ARCH} (the binaries only run on CPUs with the same features)")
+  else()
+    message(WARNING "BOTW_CPU_ARCH=${BOTW_CPU_ARCH} is not accepted by this compiler; using the portable baseline")
+  endif()
+endif()
+
 # Keep local folder names out of shipped binaries: source and build paths in __FILE__ and
 # debug info are rewritten to relative ones. Each flag is used only if the compiler accepts it.
 if(NOT MSVC)
@@ -162,21 +182,28 @@ if(NOT GUEST_SOURCES)
 endif()
 # Optimisation level for the recompiled game code (the bulk of the build time).
 set(BOTW_GUEST_OPT "-O2" CACHE STRING "Compiler optimisation flag for generated/ game code")
+# Functions the recompiler emits as big_*.cpp / huge_*.cpp are compiled with less optimisation to
+# keep RAM and build time down. If a profile (--bench-profile) shows time in those, raise them.
+set(BOTW_BIG_OPT "-O1" CACHE STRING "Optimisation flag for generated/big_*.cpp")
+set(BOTW_HUGE_OPT "-O0" CACHE STRING "Optimisation flag for generated/huge_*.cpp")
 add_library(guest OBJECT ${GUEST_SOURCES})
 target_include_directories(guest PRIVATE runtime/include generated)
 if(APPLE)
   target_compile_options(guest PRIVATE -O2 -gline-tables-only -w -fwrapv -fno-strict-aliasing -mcpu=apple-m1
     -ffp-contract=off)
 else()
-  target_compile_options(guest PRIVATE ${BOTW_GUEST_OPT} -g1 -w -fwrapv -fno-strict-aliasing -ffp-contract=off)
+  # -fno-math-errno: guest sqrt() never reads errno, so sqrtsd stays a single instruction.
+  # -ffp-contract=off stays: fma is only ever used where the PowerPC code asked for fmadd.
+  target_compile_options(guest PRIVATE ${BOTW_GUEST_OPT} -g1 -w -fwrapv -fno-strict-aliasing -ffp-contract=off
+    -fno-math-errno ${_botw_arch_opts})
 endif()
 file(GLOB BIG_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/generated/big_*.cpp)
 file(GLOB HUGE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/generated/huge_*.cpp)
 if(BIG_SOURCES)
-  set_source_files_properties(${BIG_SOURCES} PROPERTIES COMPILE_OPTIONS "-O1")
+  set_source_files_properties(${BIG_SOURCES} PROPERTIES COMPILE_OPTIONS "${BOTW_BIG_OPT}")
 endif()
 if(HUGE_SOURCES)
-  set_source_files_properties(${HUGE_SOURCES} PROPERTIES COMPILE_OPTIONS "-O0")
+  set_source_files_properties(${HUGE_SOURCES} PROPERTIES COMPILE_OPTIONS "${BOTW_HUGE_OPT}")
 endif()
 endif()
 
@@ -247,7 +274,7 @@ if(BOTW_ENABLE_VULKAN)
     endif()
   endif()
 endif()
-target_compile_options(cemu_gpu PRIVATE -w -O3 -g1 "SHELL:-include Common/precompiled.h")
+target_compile_options(cemu_gpu PRIVATE -w -O3 -g1 ${_botw_arch_opts} "SHELL:-include Common/precompiled.h")
 
 file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_SOURCE_DIR}/runtime/src/*.cpp
@@ -268,7 +295,7 @@ if(APPLE)
   target_compile_options(BotWRecomp PRIVATE -Wall -Wno-unused-function -Wno-unused-variable -fwrapv -mcpu=apple-m1
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
 else()
-  target_compile_options(BotWRecomp PRIVATE -O3 -g1 -Wall -Wno-unused-function -Wno-unused-variable -fwrapv)
+  target_compile_options(BotWRecomp PRIVATE -O3 -g1 -Wall -Wno-unused-function -Wno-unused-variable -fwrapv ${_botw_arch_opts})
 endif()
 if(BOTW_ENABLE_VULKAN)
   target_compile_definitions(BotWRecomp PRIVATE ENABLE_VULKAN)

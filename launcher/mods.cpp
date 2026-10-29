@@ -7,8 +7,11 @@
 #include "mods.h"
 #include "unzip.h"
 
+#include "coreinit/mod_expr.h"
+
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <map>
 #include <set>
@@ -214,40 +217,107 @@ void collect_tree_rel_paths(const std::filesystem::path& base,
 std::filesystem::path mods_dir(const std::filesystem::path& root) { return root / "mods"; }
 std::filesystem::path ini_path(const std::filesystem::path& root) { return root / "mods.ini"; }
 
-void parse_rules(const std::string& text, Mod& out) {
-    out.presets.clear();
-    out.texture_rules = 0;
-    std::istringstream in(text);
-    std::string line;
-    enum class Sec { None, Definition, Preset, TextureRedefine };
-    Sec sec = Sec::None;
+namespace {
 
-    std::string cur_preset_name;
-    std::string cur_preset_cat;
-    bool cur_preset_default = false;
-    auto flush_preset = [&]() {
-        if (sec != Sec::Preset || cur_preset_name.empty()) return;
+// Cuts a trailing comment the way the game does: # anywhere, // and " ;" outside double quotes.
+std::string strip_inline_comment(const std::string& line) {
+    bool in_quotes = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+        char c = line[i];
+        if (c == '"') in_quotes = !in_quotes;
+        if (in_quotes) continue;
+        if (c == '#') return line.substr(0, i);
+        if (c == ';' && (i == 0 || std::isspace(static_cast<unsigned char>(line[i - 1])))) return line.substr(0, i);
+        if (c == '/' && i + 1 < line.size() && line[i + 1] == '/') return line.substr(0, i);
+    }
+    return line;
+}
+
+// Cemu writes a line break inside a description as a literal backslash and n.
+std::string unescape_newlines(const std::string& s) {
+    std::string o;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\\' && i + 1 < s.size() && s[i + 1] == 'n') {
+            o += '\n';
+            i++;
+        } else {
+            o += s[i];
+        }
+    }
+    return o;
+}
+
+// Variable name as the expression evaluator knows it: no leading $, no ":type" suffix.
+std::string var_name(std::string name) {
+    if (!name.empty() && name[0] == '$') name.erase(0, 1);
+    auto colon = name.find(':');
+    if (colon != std::string::npos) name.erase(colon);
+    return trim(name);
+}
+
+void set_var(std::vector<std::pair<std::string, double>>& vars, const std::string& raw_name, double val) {
+    std::string name = var_name(raw_name);
+    if (name.empty()) return;
+    for (auto& kv : vars) {
+        if (kv.first == name) {
+            kv.second = val;
+            return;
+        }
+    }
+    vars.emplace_back(std::move(name), val);
+}
+
+void eval_into(std::vector<std::pair<std::string, double>>& vars, const std::string& name, const std::string& expr) {
+    double v = 0.0;
+    if (mods::expr::eval(expr, vars, &v, true)) set_var(vars, name, v);
+}
+
+// Rebuilds Mod::presets (one entry per category, in order of first appearance) from preset_defs.
+void build_categories(Mod& out) {
+    out.presets.clear();
+    for (const auto& pd : out.preset_defs) {
         PresetCategory* cat = nullptr;
-        for (auto& pc : out.presets) {
-            if (pc.category == cur_preset_cat) {
+        for (auto& pc : out.presets)
+            if (pc.category == pd.category) {
                 cat = &pc;
                 break;
             }
-        }
         if (!cat) {
-            out.presets.push_back(PresetCategory{cur_preset_cat, {}, "", ""});
+            out.presets.push_back(PresetCategory{pd.category, {}, "", ""});
             cat = &out.presets.back();
         }
-        if (std::find(cat->options.begin(), cat->options.end(), cur_preset_name) == cat->options.end()) {
-            cat->options.push_back(cur_preset_name);
-        }
-        if (cur_preset_default || cat->default_option.empty()) {
-            cat->default_option = cur_preset_name;
-            cat->active = cur_preset_name;
-        }
-        cur_preset_name.clear();
-        cur_preset_cat.clear();
-        cur_preset_default = false;
+        if (std::find(cat->options.begin(), cat->options.end(), pd.name) == cat->options.end()) cat->options.push_back(pd.name);
+    }
+    for (auto& pc : out.presets) {
+        // The first option marked default = 1 wins, as in the game. Without one, the first option.
+        pc.default_option = pc.options.front();
+        for (const auto& pd : out.preset_defs)
+            if (pd.category == pc.category && pd.is_default) {
+                pc.default_option = pd.name;
+                break;
+            }
+        pc.active = pc.default_option;
+    }
+}
+
+}  // namespace
+
+void parse_rules(const std::string& text, Mod& out) {
+    out.presets.clear();
+    out.preset_defs.clear();
+    out.default_vars.clear();
+    out.texture_rules = 0;
+    std::istringstream in(text);
+    std::string line;
+    enum class Sec { None, Definition, Default, Preset, TextureRedefine };
+    Sec sec = Sec::None;
+
+    PresetOption cur;
+    bool have_preset = false;
+    auto flush_preset = [&]() {
+        if (have_preset && !cur.name.empty()) out.preset_defs.push_back(std::move(cur));
+        cur = PresetOption{};
+        have_preset = false;
     };
 
     while (std::getline(in, line)) {
@@ -257,8 +327,11 @@ void parse_rules(const std::string& text, Mod& out) {
             flush_preset();
             std::string l = lower(line);
             if (l.rfind("[definition]", 0) == 0) sec = Sec::Definition;
-            else if (l.rfind("[preset]", 0) == 0) sec = Sec::Preset;
-            else if (l.rfind("[textureredefine]", 0) == 0) {
+            else if (l.rfind("[default]", 0) == 0) sec = Sec::Default;
+            else if (l.rfind("[preset]", 0) == 0) {
+                sec = Sec::Preset;
+                have_preset = true;
+            } else if (l.rfind("[textureredefine]", 0) == 0) {
                 sec = Sec::TextureRedefine;
                 out.texture_rules++;
             } else {
@@ -268,19 +341,75 @@ void parse_rules(const std::string& text, Mod& out) {
         }
         auto eq = line.find('=');
         if (eq == std::string::npos) continue;
-        std::string k = lower(trim(line.substr(0, eq)));
-        std::string v = unquote(line.substr(eq + 1));
+        std::string raw_k = trim(line.substr(0, eq));
+        std::string k = lower(raw_k);
+        // Names, descriptions and paths are free text: a # or // in them is part of the text.
+        bool free_text = (sec == Sec::Definition && (k == "name" || k == "description" || k == "path")) ||
+                         (sec == Sec::Preset && k == "name");
+        std::string v = unquote(free_text ? line.substr(eq + 1) : strip_inline_comment(line.substr(eq + 1)));
+
+        if (!raw_k.empty() && raw_k[0] == '$') {
+            // $variable = expression: a preset's own values, or the defaults before any preset.
+            if (sec == Sec::Preset) cur.vars.emplace_back(raw_k, v);
+            else out.default_vars.emplace_back(raw_k, v);
+            continue;
+        }
         if (sec == Sec::Definition) {
             if (k == "name" && !v.empty()) out.name = v;
-            else if (k == "description") out.description = v;
+            else if (k == "description") out.description = unescape_newlines(v);
             else if (k == "version") out.version = v;
+            else if (k == "path") out.path = v;
         } else if (sec == Sec::Preset) {
-            if (k == "name") cur_preset_name = v;
-            else if (k == "category") cur_preset_cat = v;
-            else if (k == "default") cur_preset_default = (v == "1" || lower(v) == "true");
+            if (k == "name") cur.name = v;
+            else if (k == "category") cur.category = v;
+            else if (k == "default") cur.is_default = (v == "1" || lower(v) == "true" || lower(v) == "yes");
+            else if (k == "condition") cur.condition = v;
+        } else if (sec == Sec::Default) {
+            out.default_vars.emplace_back(raw_k, v);
         }
     }
     flush_preset();
+    build_categories(out);
+}
+
+std::vector<PresetChoice> visible_presets(const Mod& mod) {
+    std::vector<PresetChoice> out;
+    std::vector<std::pair<std::string, double>> vars;
+    for (const auto& kv : mod.default_vars) eval_into(vars, kv.first, kv.second);
+
+    for (size_t ci = 0; ci < mod.presets.size(); ci++) {
+        const PresetCategory& pc = mod.presets[ci];
+        std::vector<const PresetOption*> offered;
+        for (const auto& pd : mod.preset_defs) {
+            if (pd.category != pc.category) continue;
+            if (!pd.condition.empty()) {
+                double c = 0.0;
+                if (!mods::expr::eval(pd.condition, vars, &c, true) || std::fabs(c) <= 1e-12) continue;
+            }
+            offered.push_back(&pd);
+        }
+        if (offered.empty()) continue;
+
+        PresetChoice ch;
+        ch.category_index = ci;
+        ch.label = pc.category.empty() ? "Preset" : pc.category;
+        const PresetOption* chosen = nullptr;
+        const PresetOption* dflt = nullptr;
+        for (const PresetOption* po : offered) {
+            if (std::find(ch.options.begin(), ch.options.end(), po->name) == ch.options.end()) ch.options.push_back(po->name);
+            if (!chosen && !pc.active.empty() && lower(po->name) == lower(pc.active)) chosen = po;
+            if (!dflt && po->is_default) dflt = po;
+        }
+        if (!chosen) chosen = dflt ? dflt : offered.front();
+        ch.active = chosen->name;
+        out.push_back(std::move(ch));
+        for (const auto& kv : chosen->vars) eval_into(vars, kv.first, kv.second);
+    }
+    return out;
+}
+
+void reset_presets(Mod& mod) {
+    for (auto& pc : mod.presets) pc.active = pc.default_option;
 }
 
 State load(const std::filesystem::path& root) {
@@ -381,9 +510,12 @@ State load(const std::filesystem::path& root) {
                 if (lower(m.folder) != lower(mod_key)) continue;
                 for (auto& pc : m.presets) {
                     if (lower(pc.category) == lower(cat_key) || (cat_key.empty() && m.presets.size() == 1)) {
-                        if (std::find(pc.options.begin(), pc.options.end(), v) != pc.options.end()) {
-                            pc.active = v;
-                        }
+                        // The game matches preset names without regard to case; keep the declared spelling.
+                        for (const auto& o : pc.options)
+                            if (lower(o) == lower(v)) {
+                                pc.active = o;
+                                break;
+                            }
                     }
                 }
             }
@@ -484,9 +616,11 @@ bool save(const std::filesystem::path& root, const State& st, bool write_order, 
     }
     if (any_presets || ini.find("Presets")) {
         auto* pr = ini.find("Presets");
+        bool created = false;
         if (!pr) {
             ini.sections.push_back({"Presets", {}});
             pr = &ini.sections.back();
+            created = true;
         }
         for (const auto& m : st.list) {
             for (const auto& pc : m.presets) {
@@ -500,9 +634,12 @@ bool save(const std::filesystem::path& root, const State& st, bool write_order, 
                         set = true;
                     }
                 }
-                if (!set) pr->keys.emplace_back(key, pc.active);
+                // A pick that is just the pack's default only needs a line when one is already there
+                // (to put an earlier choice back), so mods.ini stays short with many packs installed.
+                if (!set && pc.active != pc.default_option) pr->keys.emplace_back(key, pc.active);
             }
         }
+        if (created && pr->keys.empty()) ini.sections.pop_back();  // nothing to say: no empty [Presets]
     }
 
     std::error_code ec;

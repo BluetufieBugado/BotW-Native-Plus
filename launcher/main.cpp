@@ -41,7 +41,7 @@ const COLORREF kAccent = RGB(56, 96, 128);   // muted steel blue, the only accen
 const COLORREF kOk = RGB(40, 110, 60);
 const COLORREF kBad = RGB(160, 50, 40);
 
-enum : UINT { WM_MERGE_PROGRESS = WM_APP + 1, WM_MERGE_DONE };
+enum : UINT { WM_MERGE_PROGRESS = WM_APP + 1, WM_MERGE_DONE, WM_MODS_REBUILD };
 enum Step { S_WELCOME, S_GAME, S_BUILD, S_USER, S_PAD, S_GFX, S_MODS, S_READY, S_COUNT };
 const wchar_t* kStepNames[S_COUNT] = {L"Welcome", L"Game files", L"Build the game", L"Saves folder", L"Controller",
                                       L"Graphics", L"Mods (optional)", L"Ready"};
@@ -53,7 +53,8 @@ enum Id {
     ID_MODLIST, ID_MODSAVE, ID_GAME_EDIT, ID_USER_EDIT,
     ID_SRC_EDIT, ID_SRC_BROWSE, ID_TC_INSTALL, ID_TC_LINK, ID_TC_RECHECK, ID_PREBUILT, ID_BUILD, ID_BUILD_STOP,
     ID_GFX, ID_GFX_SAVE,
-    ID_MOD_IMPORT_ZIP, ID_MOD_IMPORT_DIR, ID_MOD_GET,
+    ID_MOD_IMPORT_ZIP, ID_MOD_IMPORT_DIR, ID_MOD_GET, ID_MOD_UP, ID_MOD_DOWN, ID_MOD_RESET,
+    ID_MODSET_BASE = 1000,  // one id per drop-down in a mod's settings panel
 };
 
 struct Config {
@@ -919,58 +920,403 @@ void play() {
 }
 
 // ---------- mods window ----------
+// Left: every mod with a tick box. Right: what the selected mod is and the settings it offers, one
+// drop-down per [Preset] category, like the graphic pack settings in Cemu (Draw Distance, texture
+// quality, ...). A pick can add or remove other drop-downs, because a preset's `condition` looks at the
+// choices made before it, so the panel is checked again after every pick. Nothing is written until Save.
 HWND g_mods_wnd{}, g_mods_list{};
+HWND g_m_title{}, g_m_sub{}, g_m_desc{}, g_m_hint{}, g_m_panel{}, g_m_reset{}, g_m_up{}, g_m_down{};
 mods::State g_mods;
+int g_mods_sel = -1;
+bool g_mods_filling = false;    // list notifications are ignored while the list is rebuilt
+bool g_mods_reordered = false;  // Move up / Move down was used, so Save writes the order
 
-// Rebuilds the list from disk. With keep_ticks, boxes ticked or cleared but not saved yet stay as they are.
-void fill_mod_list(bool keep_ticks) {
-    std::map<std::string, bool> ticks;
-    if (keep_ticks)
-        for (size_t i = 0; i < g_mods.list.size(); i++)
-            ticks[g_mods.list[i].folder] = ListView_GetCheckState(g_mods_list, (int)i) != 0;
-    g_mods = mods::load(fs::path(A.cfg.user));
+struct SettingRow {
+    HWND label{}, combo{};          // combo is null for a plain note
+    size_t category = 0;            // index into Mod::presets
+    std::vector<std::string> options;
+};
+std::vector<SettingRow> g_rows;
+int g_panel_h = 0, g_panel_y = 0;   // height of everything in the settings panel, and how far it is scrolled
+constexpr int kMaxSettingRows = 64;
+
+int dp(int v) { static const int dpi = (int)GetDpiForSystem(); return MulDiv(v, dpi, 96); }
+
+std::wstring plural(size_t n, const wchar_t* one, const wchar_t* many) {
+    return std::to_wstring(n) + L" " + (n == 1 ? one : many);
+}
+
+// Text for an edit box: line breaks must be CR LF.
+std::wstring with_crlf(const std::string& utf8) {
+    std::wstring o;
+    for (wchar_t ch : widen(utf8)) {
+        if (ch == L'\n') o += L"\r\n";
+        else if (ch != L'\r') o += ch;
+    }
+    return o;
+}
+
+size_t index_of(const std::vector<std::string>& v, const std::string& s) {
+    for (size_t i = 0; i < v.size(); i++)
+        if (v[i] == s) return i;
+    return 0;
+}
+
+// Takes the tick boxes as they are now into g_mods.
+void mods_sync_ticks() {
+    for (size_t i = 0; i < g_mods.list.size(); i++)
+        g_mods.list[i].enabled = ListView_GetCheckState(g_mods_list, (int)i) != 0;
+}
+
+// A wheel turn over a closed drop-down scrolls the panel instead of changing the setting by accident.
+LRESULT CALLBACK combo_wheel_proc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (m == WM_MOUSEWHEEL && g_m_panel && !SendMessageW(h, CB_GETDROPPEDSTATE, 0, 0))
+        return SendMessageW(g_m_panel, WM_MOUSEWHEEL, wp, lp);
+    return DefSubclassProc(h, m, wp, lp);
+}
+
+// Places the drop-downs one under another and sets the scroll bar to match.
+void panel_layout() {
+    if (!g_m_panel) return;
+    RECT rc{};
+    GetClientRect(g_m_panel, &rc);
+    const int pad = dp(12), label_h = dp(18), combo_h = dp(24), gap = dp(14), note_h = dp(64);
+    int content = pad;
+    for (const auto& r : g_rows) content += r.combo ? label_h + dp(2) + combo_h + gap : note_h;
+    g_panel_h = content + pad;
+    int page = (int)rc.bottom;
+    g_panel_y = std::clamp(g_panel_y, 0, std::max(0, g_panel_h - page));
+
+    SCROLLINFO si{};
+    si.cbSize = sizeof si;
+    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL;
+    si.nMin = 0;
+    si.nMax = std::max(g_panel_h - 1, 0);
+    si.nPage = (UINT)page;
+    si.nPos = g_panel_y;
+    SetScrollInfo(g_m_panel, SB_VERT, &si, TRUE);
+
+    int w = std::max<int>((int)rc.right - 2 * pad, dp(80));
+    int y = pad;
+    for (auto& r : g_rows) {
+        if (r.combo) {
+            SetWindowPos(r.label, nullptr, pad, y - g_panel_y, w, label_h, SWP_NOZORDER | SWP_NOACTIVATE);
+            y += label_h + dp(2);
+            SetWindowPos(r.combo, nullptr, pad, y - g_panel_y, w, dp(240), SWP_NOZORDER | SWP_NOACTIVATE);
+            y += combo_h + gap;
+        } else {
+            SetWindowPos(r.label, nullptr, pad, y - g_panel_y, w, note_h, SWP_NOZORDER | SWP_NOACTIVATE);
+            y += note_h;
+        }
+    }
+    RedrawWindow(g_m_panel, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
+LRESULT CALLBACK mods_panel_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_COMMAND: return SendMessageW(GetParent(w), WM_COMMAND, wp, lp);  // a drop-down changed
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = (HDC)wp;
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+        return (LRESULT)A.white;
+    }
+    case WM_SIZE: panel_layout(); return 0;
+    case WM_VSCROLL: {
+        SCROLLINFO si{};
+        si.cbSize = sizeof si;
+        si.fMask = SIF_ALL;
+        GetScrollInfo(w, SB_VERT, &si);
+        int pos = si.nPos;
+        switch (LOWORD(wp)) {
+        case SB_LINEUP: pos -= dp(24); break;
+        case SB_LINEDOWN: pos += dp(24); break;
+        case SB_PAGEUP: pos -= (int)si.nPage; break;
+        case SB_PAGEDOWN: pos += (int)si.nPage; break;
+        case SB_THUMBTRACK: case SB_THUMBPOSITION: pos = si.nTrackPos; break;
+        case SB_TOP: pos = 0; break;
+        case SB_BOTTOM: pos = si.nMax; break;
+        }
+        g_panel_y = pos;
+        panel_layout();
+        return 0;
+    }
+    case WM_MOUSEWHEEL:
+        g_panel_y -= GET_WHEEL_DELTA_WPARAM(wp) * dp(48) / WHEEL_DELTA;
+        panel_layout();
+        return 0;
+    }
+    return DefWindowProcW(w, m, wp, lp);
+}
+
+// "Settings" line above the panel: says so when the mod is off, because its settings only count once it is on.
+void mods_update_hint() {
+    bool have = g_mods_sel >= 0 && g_mods_sel < (int)g_mods.list.size();
+    bool on = have && ListView_GetCheckState(g_mods_list, g_mods_sel) != 0;
+    SetWindowTextW(g_m_hint, !have || on ? L"Settings" : L"Settings  (this mod is off - tick it to use them)");
+}
+
+// Rebuilds the drop-downs for the selected mod from its current picks. focus_category is the category whose
+// drop-down gets the keyboard focus back (the one that was just changed).
+void mods_rebuild_settings(size_t focus_category) {
+    for (auto& r : g_rows) {
+        if (r.label) DestroyWindow(r.label);
+        if (r.combo) DestroyWindow(r.combo);
+    }
+    g_rows.clear();
+    auto make = [&](const wchar_t* cls, const std::wstring& text, DWORD style, int id, HFONT font) {
+        HWND h = CreateWindowExW(0, cls, text.c_str(), WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, g_m_panel,
+                                 (HMENU)(INT_PTR)id, A.inst, nullptr);
+        SendMessageW(h, WM_SETFONT, (WPARAM)font, TRUE);
+        return h;
+    };
+    auto note = [&](const wchar_t* text) {
+        SettingRow r;
+        r.label = make(L"STATIC", text, SS_LEFT, 0, A.font);
+        g_rows.push_back(std::move(r));
+    };
+
+    bool have = g_mods_sel >= 0 && g_mods_sel < (int)g_mods.list.size();
+    HWND focus = nullptr;
+    if (!have) {
+        note(L"Select a mod on the left to see its settings.");
+    } else {
+        const mods::Mod& m = g_mods.list[g_mods_sel];
+        auto choices = mods::visible_presets(m);
+        if (choices.empty())
+            note(m.preset_defs.empty() ? L"This mod has no settings. Tick it to turn it on."
+                                       : L"No settings are offered with the current choices.");
+        for (size_t i = 0; i < choices.size() && i < (size_t)kMaxSettingRows; i++) {
+            const auto& c = choices[i];
+            SettingRow r;
+            r.category = c.category_index;
+            r.options = c.options;
+            r.label = make(L"STATIC", widen(c.label), SS_LEFT | SS_ENDELLIPSIS, 0, A.bold);
+            r.combo = make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, ID_MODSET_BASE + (int)i, A.font);
+            for (const auto& o : c.options) SendMessageW(r.combo, CB_ADDSTRING, 0, (LPARAM)widen(o).c_str());
+            SendMessageW(r.combo, CB_SETCURSEL, (WPARAM)index_of(c.options, c.active), 0);
+            SendMessageW(r.combo, CB_SETMINVISIBLE, 12, 0);
+            SetWindowSubclass(r.combo, combo_wheel_proc, 1, 0);
+            if (c.category_index == focus_category) focus = r.combo;
+            g_rows.push_back(std::move(r));
+        }
+    }
+    EnableWindow(g_m_reset, have && !g_mods.list[g_mods_sel].presets.empty());
+    mods_update_hint();
+    panel_layout();
+    if (focus) SetFocus(focus);
+}
+
+// Fills the title, facts and description for the selected mod, then its settings.
+void mods_select(int idx) {
+    g_mods_sel = idx;
+    bool have = idx >= 0 && idx < (int)g_mods.list.size();
+    if (!have) {
+        g_mods_sel = -1;
+        SetWindowTextW(g_m_title, L"No mods yet");
+        SetWindowTextW(g_m_sub, L"");
+        SetWindowTextW(g_m_desc, L"Add a mod archive or folder, or import graphic packs from Cemu, with the buttons below.");
+    } else {
+        const mods::Mod& m = g_mods.list[idx];
+        SetWindowTextW(g_m_title, widen(m.name).c_str());
+        std::vector<std::wstring> facts;
+        if (!m.version.empty()) facts.push_back(L"Version " + widen(m.version));
+        size_t files = (size_t)m.content_files + m.aoc_files;
+        if (files) facts.push_back(plural(files, L"file", L"files"));
+        if (m.patch_files) facts.push_back(plural(m.patch_files, L"patch file", L"patch files"));
+        if (m.shader_files) facts.push_back(plural(m.shader_files, L"shader", L"shaders"));
+        if (m.texture_rules) facts.push_back(plural(m.texture_rules, L"texture rule", L"texture rules"));
+        if (!m.path.empty()) {
+            std::wstring p = widen(m.path);
+            for (auto& ch : p)
+                if (ch == L'/') ch = L'>';
+            facts.push_back(p);
+        }
+        std::wstring sub;
+        for (size_t i = 0; i < facts.size(); i++) sub += (i ? L"  \u00B7  " : L"") + facts[i];
+        SetWindowTextW(g_m_sub, sub.c_str());
+        std::wstring desc = with_crlf(m.description);
+        bool inert = !m.has_content && !m.has_aoc && !m.patch_files && !m.shader_files && !m.texture_rules && m.presets.empty();
+        if (desc.empty()) desc = inert ? L"This folder has no content, DLC, patches or shaders, so it changes nothing." : L"No description.";
+        SetWindowTextW(g_m_desc, desc.c_str());
+    }
+    EnableWindow(g_m_up, have && idx > 0);
+    EnableWindow(g_m_down, have && idx + 1 < (int)g_mods.list.size());
+    g_panel_y = 0;
+    mods_rebuild_settings((size_t)-1);
+}
+
+// Shows g_mods in the list, with select_folder selected (or the first mod).
+void mods_fill_list(const std::string& select_folder) {
+    g_mods_filling = true;
     ListView_DeleteAllItems(g_mods_list);
+    int sel = -1;
     for (size_t i = 0; i < g_mods.list.size(); i++) {
-        auto t = ticks.find(g_mods.list[i].folder);
-        if (t != ticks.end()) g_mods.list[i].enabled = t->second;
-        std::wstring n = widen(g_mods.list[i].name);
-        LVITEMW it{LVIF_TEXT, (int)i};
+        const mods::Mod& m = g_mods.list[i];
+        std::wstring n = widen(m.name);
+        LVITEMW it{};
+        it.mask = LVIF_TEXT;
+        it.iItem = (int)i;
         it.pszText = n.data();
         ListView_InsertItem(g_mods_list, &it);
-        ListView_SetCheckState(g_mods_list, (int)i, g_mods.list[i].enabled);
+        std::wstring s = m.presets.empty() ? L"" : plural(m.presets.size(), L"setting", L"settings");
+        ListView_SetItemText(g_mods_list, (int)i, 1, s.data());
+        ListView_SetCheckState(g_mods_list, (int)i, m.enabled);
+        if (m.folder == select_folder) sel = (int)i;
     }
+    if (sel < 0 && !g_mods.list.empty()) sel = 0;
+    if (sel >= 0) {
+        ListView_SetItemState(g_mods_list, sel, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_EnsureVisible(g_mods_list, sel, FALSE);
+    }
+    g_mods_filling = false;
+    mods_select(sel);
+}
+
+// Reads the mods folder again (after adding or importing) and keeps what was changed but not saved yet:
+// ticks, picks and the order. select_folder is the mod to select afterwards.
+void mods_reload_keep_pending(const std::string& select_folder) {
+    mods_sync_ticks();
+    std::string keep = select_folder;
+    if (keep.empty() && g_mods_sel >= 0 && g_mods_sel < (int)g_mods.list.size()) keep = g_mods.list[g_mods_sel].folder;
+    mods::State old = std::move(g_mods);
+    g_mods = mods::load(fs::path(A.cfg.user));
+    std::map<std::string, size_t> was;  // folder -> position in the list before
+    for (size_t i = 0; i < old.list.size(); i++) was[old.list[i].folder] = i;
+    for (auto& m : g_mods.list) {
+        auto it = was.find(m.folder);
+        if (it == was.end()) continue;  // new: keep what the files say (installed mods start on, imported packs off)
+        const mods::Mod& o = old.list[it->second];
+        m.enabled = o.enabled;
+        for (auto& pc : m.presets)
+            for (const auto& op : o.presets)
+                if (op.category == pc.category && std::find(pc.options.begin(), pc.options.end(), op.active) != pc.options.end())
+                    pc.active = op.active;
+    }
+    if (g_mods_reordered)
+        std::stable_sort(g_mods.list.begin(), g_mods.list.end(), [&](const mods::Mod& a, const mods::Mod& b) {
+            auto ia = was.find(a.folder), ib = was.find(b.folder);
+            size_t x = ia == was.end() ? (size_t)-1 : ia->second, y = ib == was.end() ? (size_t)-1 : ib->second;
+            return x < y;
+        });
+    mods_fill_list(keep);
+}
+
+void mods_move(int delta) {
+    int i = g_mods_sel, j = i + delta;
+    if (i < 0 || j < 0 || j >= (int)g_mods.list.size()) return;
+    mods_sync_ticks();
+    std::swap(g_mods.list[i], g_mods.list[j]);
+    g_mods_reordered = true;
+    mods_fill_list(g_mods.list[j].folder);
+    SetFocus(g_mods_list);
+}
+
+// A drop-down was changed: store the pick, then see whether the set of drop-downs changed with it.
+void mods_on_pick(int row) {
+    if (g_mods_sel < 0 || row < 0 || row >= (int)g_rows.size() || !g_rows[row].combo) return;
+    const SettingRow& r = g_rows[row];
+    int sel = (int)SendMessageW(r.combo, CB_GETCURSEL, 0, 0);
+    if (sel < 0 || sel >= (int)r.options.size()) return;
+    g_mods.list[g_mods_sel].presets[r.category].active = r.options[sel];
+    // Rebuilding destroys the drop-down that is still handling this message, so it is done afterwards.
+    PostMessageW(g_mods_wnd, WM_MODS_REBUILD, (WPARAM)r.category, 0);
+}
+
+void mods_after_pick(size_t category) {
+    if (g_mods_sel < 0) return;
+    auto now = mods::visible_presets(g_mods.list[g_mods_sel]);
+    bool same = now.size() == g_rows.size();
+    for (size_t i = 0; same && i < now.size(); i++)
+        same = g_rows[i].combo && g_rows[i].category == now[i].category_index && g_rows[i].options == now[i].options;
+    if (!same) {
+        mods_rebuild_settings(category);
+        return;
+    }
+    for (size_t i = 0; i < now.size(); i++)
+        SendMessageW(g_rows[i].combo, CB_SETCURSEL, (WPARAM)index_of(now[i].options, now[i].active), 0);
 }
 
 LRESULT CALLBACK mods_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
-    case WM_COMMAND:
-        if (LOWORD(wp) == ID_MODSAVE) {
-            for (size_t i = 0; i < g_mods.list.size(); i++) g_mods.list[i].enabled = ListView_GetCheckState(g_mods_list, (int)i) != 0;
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = (HDC)wp;
+        HWND c = (HWND)lp;
+        SetBkMode(dc, TRANSPARENT);
+        COLORREF col = GetSysColor(COLOR_WINDOWTEXT);
+        if (c == g_m_title) col = kAccent;
+        else if (c == g_m_sub || c == g_m_hint) col = GetSysColor(COLOR_GRAYTEXT);
+        SetTextColor(dc, col);
+        return (LRESULT)A.white;
+    }
+    case WM_NOTIFY: {
+        auto* nh = (NMHDR*)lp;
+        if (nh->idFrom == ID_MODLIST && nh->code == LVN_ITEMCHANGED && !g_mods_filling) {
+            auto* nl = (NMLISTVIEW*)lp;
+            if (nl->iItem >= 0 && (nl->uChanged & LVIF_STATE)) {
+                if ((nl->uNewState & LVIS_SELECTED) && !(nl->uOldState & LVIS_SELECTED)) {
+                    mods_select(nl->iItem);
+                } else if ((nl->uNewState ^ nl->uOldState) & LVIS_STATEIMAGEMASK) {
+                    mods_sync_ticks();
+                    if (nl->iItem == g_mods_sel) mods_update_hint();
+                }
+            }
+        }
+        return 0;
+    }
+    case WM_MODS_REBUILD: mods_after_pick((size_t)wp); return 0;
+    case WM_MOUSEWHEEL: {
+        // Over the settings panel but with the focus somewhere else: scroll the panel.
+        POINT pt{(short)LOWORD(lp), (short)HIWORD(lp)};
+        RECT pr{};
+        if (g_m_panel && GetWindowRect(g_m_panel, &pr) && PtInRect(&pr, pt)) return SendMessageW(g_m_panel, WM_MOUSEWHEEL, wp, lp);
+        break;
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(wp);
+        if (id >= ID_MODSET_BASE && id < ID_MODSET_BASE + kMaxSettingRows) {
+            if (HIWORD(wp) == CBN_SELCHANGE) mods_on_pick(id - ID_MODSET_BASE);
+            return 0;
+        }
+        if (id == ID_MODSAVE) {
+            mods_sync_ticks();
             std::string err;
-            if (!mods::save(fs::path(A.cfg.user), g_mods, false, err)) MessageBoxW(w, widen(err).c_str(), kTitle, MB_ICONWARNING);
+            if (mods::save(fs::path(A.cfg.user), g_mods, g_mods_reordered, err)) DestroyWindow(w);
+            else MessageBoxW(w, widen(err).c_str(), kTitle, MB_ICONWARNING);  // stay open so nothing is lost
+        } else if (id == IDCANCEL) {
             DestroyWindow(w);
-        } else if (LOWORD(wp) == IDCANCEL) DestroyWindow(w);
-        else if (LOWORD(wp) == ID_MOD_ADD || LOWORD(wp) == ID_MOD_ADDDIR) {
-            std::wstring src = LOWORD(wp) == ID_MOD_ADD ? pick_zip(w) : pick_folder(w, L"Choose a mod folder", L"");
+        } else if (id == ID_MOD_UP) {
+            mods_move(-1);
+        } else if (id == ID_MOD_DOWN) {
+            mods_move(1);
+        } else if (id == ID_MOD_RESET) {
+            if (g_mods_sel >= 0 && g_mods_sel < (int)g_mods.list.size()) {
+                mods::reset_presets(g_mods.list[g_mods_sel]);
+                g_panel_y = 0;
+                mods_rebuild_settings((size_t)-1);
+            }
+        } else if (id == ID_MOD_ADD || id == ID_MOD_ADDDIR) {
+            std::wstring src = id == ID_MOD_ADD ? pick_zip(w) : pick_folder(w, L"Choose a mod folder", L"");
             if (!src.empty()) {
                 std::string folder, err;
                 if (!mods::install_mod(fs::path(A.cfg.user), fs::path(src), folder, err)) MessageBoxW(w, widen(err).c_str(), kTitle, MB_ICONWARNING);
-                fill_mod_list(true);
+                mods_reload_keep_pending(folder);
             }
-        } else if (LOWORD(wp) == ID_MOD_IMPORT_ZIP || LOWORD(wp) == ID_MOD_IMPORT_DIR) {
-            std::wstring src = LOWORD(wp) == ID_MOD_IMPORT_ZIP ? pick_zip(w) : pick_folder(w, L"Choose Cemu's graphicPacks folder", L"");
+        } else if (id == ID_MOD_IMPORT_ZIP || id == ID_MOD_IMPORT_DIR) {
+            std::wstring src = id == ID_MOD_IMPORT_ZIP ? pick_zip(w) : pick_folder(w, L"Choose Cemu's graphicPacks folder", L"");
             if (!src.empty()) {
                 SetCursor(LoadCursorW(nullptr, IDC_WAIT));
                 mods::ImportReport rep;
                 std::string err;
                 bool ok = mods::import_cemu_packs(fs::path(A.cfg.user), fs::path(src), rep, err);
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
-                fill_mod_list(true);
+                mods_reload_keep_pending(rep.imported.empty() ? std::string() : rep.imported.front());
                 if (!ok) {
                     MessageBoxW(w, widen(err).c_str(), kTitle, MB_ICONWARNING);
                 } else {
                     std::wstring msg = L"Imported " + std::to_wstring(rep.imported.size()) +
-                                       L" Breath of the Wild pack(s). All of them are switched off: tick the ones you want, then press Save.";
+                                       L" Breath of the Wild pack(s). All of them are switched off: tick the ones you want, "
+                                       L"choose their settings on the right, then press Save.";
                     if (rep.with_patches > 0)
                         msg += L"\r\n\r\n" + std::to_wstring(rep.with_patches) +
                                L" of them patch the game's code. This port applies only data changes and simple function patches, "
@@ -979,41 +1325,79 @@ LRESULT CALLBACK mods_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
                     MessageBoxW(w, msg.c_str(), kTitle, MB_ICONINFORMATION);
                 }
             }
-        } else if (LOWORD(wp) == ID_MOD_GET) {
+        } else if (id == ID_MOD_GET) {
             ShellExecuteW(w, L"open", L"https://github.com/cemu-project/cemu_graphic_packs/releases", nullptr, nullptr, SW_SHOWNORMAL);
         }
         return 0;
+    }
     case WM_CLOSE: DestroyWindow(w); return 0;
-    case WM_DESTROY: EnableWindow(A.wnd, TRUE); SetForegroundWindow(A.wnd); g_mods_wnd = nullptr; refresh_main(); return 0;
+    case WM_DESTROY:
+        g_rows.clear();  // the controls go with the window
+        g_mods_wnd = g_mods_list = g_m_title = g_m_sub = g_m_desc = g_m_hint = g_m_panel = g_m_reset = g_m_up = g_m_down = nullptr;
+        g_mods = mods::State{};
+        EnableWindow(A.wnd, TRUE);
+        SetForegroundWindow(A.wnd);
+        refresh_main();
+        return 0;
     }
     return DefWindowProcW(w, m, wp, lp);
 }
 
 void show_mods() {
     if (g_mods_wnd) return;
-    RECT r{0, 0, 520, 416};
+    g_mods_sel = -1;
+    g_mods_reordered = false;
+    g_panel_y = 0;
+    RECT r{0, 0, dp(900), dp(528)};
     AdjustWindowRect(&r, WS_CAPTION | WS_SYSMENU, FALSE);
-    g_mods_wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"BotWNativeMods", L"Mods", WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-                                 CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, A.wnd, nullptr, A.inst, nullptr);
-    auto c = [&](const wchar_t* cls, const wchar_t* t, DWORD st, int x, int y, int ww, int h, int id) {
-        HWND hh = CreateWindowExW(0, cls, t, WS_CHILD | WS_VISIBLE | st, x, y, ww, h, g_mods_wnd, (HMENU)(INT_PTR)id, A.inst, nullptr);
-        SendMessageW(hh, WM_SETFONT, (WPARAM)A.font, TRUE);
+    int ww = r.right - r.left, wh = r.bottom - r.top;
+    RECT o{}, wa{};
+    GetWindowRect(A.wnd, &o);
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int x = o.left + ((o.right - o.left) - ww) / 2, y = o.top + ((o.bottom - o.top) - wh) / 2;
+    x = std::clamp(x, (int)wa.left, std::max((int)wa.left, (int)wa.right - ww));
+    y = std::clamp(y, (int)wa.top, std::max((int)wa.top, (int)wa.bottom - wh));
+    g_mods_wnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"BotWNativeMods", L"Mods", WS_CAPTION | WS_SYSMENU | WS_VISIBLE | WS_CLIPCHILDREN,
+                                 x, y, ww, wh, A.wnd, nullptr, A.inst, nullptr);
+    auto c = [&](const wchar_t* cls, const wchar_t* t, DWORD st, int cx, int cy, int cw, int ch, int id, DWORD ex = 0, HFONT font = nullptr) {
+        HWND hh = CreateWindowExW(ex, cls, t, WS_CHILD | WS_VISIBLE | st, dp(cx), dp(cy), dp(cw), dp(ch), g_mods_wnd,
+                                  (HMENU)(INT_PTR)id, A.inst, nullptr);
+        SendMessageW(hh, WM_SETFONT, (WPARAM)(font ? font : A.font), TRUE);
         return hh;
     };
-    c(L"STATIC", L"Tick a mod to turn it on. Mods lower in the list win when two change the same file.", SS_LEFT, 12, 10, 496, 20, 0);
-    g_mods_list = c(WC_LISTVIEWW, L"", WS_BORDER | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL, 12, 34, 496, 280, ID_MODLIST);
+    // Left: the list.
+    c(L"STATIC", L"Tick a mod to turn it on. Mods lower in the list win when two change the same file.", SS_LEFT, 12, 10, 340, 34, 0);
+    g_mods_list = c(WC_LISTVIEWW, L"", WS_BORDER | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 12, 48, 340, 366, ID_MODLIST);
     ListView_SetExtendedListViewStyle(g_mods_list, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT);
-    LVCOLUMNW col{LVCF_WIDTH};
-    col.cx = 470;
+    LVCOLUMNW col{};
+    col.mask = LVCF_TEXT | LVCF_WIDTH;
+    col.pszText = const_cast<wchar_t*>(L"Mod");
+    col.cx = dp(212);
     ListView_InsertColumn(g_mods_list, 0, &col);
-    c(L"BUTTON", L"Add archive...", BS_PUSHBUTTON, 12, 330, 110, 28, ID_MOD_ADD);
-    c(L"BUTTON", L"Add folder...", BS_PUSHBUTTON, 128, 330, 110, 28, ID_MOD_ADDDIR);
-    c(L"BUTTON", L"Import Cemu zip...", BS_PUSHBUTTON, 12, 366, 150, 28, ID_MOD_IMPORT_ZIP);
-    c(L"BUTTON", L"Import Cemu folder...", BS_PUSHBUTTON, 168, 366, 170, 28, ID_MOD_IMPORT_DIR);
-    c(L"BUTTON", L"Get packs online", BS_PUSHBUTTON, 344, 366, 164, 28, ID_MOD_GET);
-    c(L"BUTTON", L"Cancel", BS_PUSHBUTTON, 312, 330, 90, 28, IDCANCEL);
-    c(L"BUTTON", L"Save", BS_DEFPUSHBUTTON, 410, 330, 98, 28, ID_MODSAVE);
-    fill_mod_list(false);
+    col.pszText = const_cast<wchar_t*>(L"Settings");
+    col.cx = dp(88);
+    ListView_InsertColumn(g_mods_list, 1, &col);
+    g_m_up = c(L"BUTTON", L"Move up", BS_PUSHBUTTON | WS_TABSTOP, 12, 422, 100, 26, ID_MOD_UP);
+    g_m_down = c(L"BUTTON", L"Move down", BS_PUSHBUTTON | WS_TABSTOP, 118, 422, 100, 26, ID_MOD_DOWN);
+    // Right: the selected mod.
+    g_m_title = c(L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS, 366, 10, 522, 30, 0, 0, A.title);
+    g_m_sub = c(L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS, 366, 42, 522, 18, 0);
+    g_m_desc = c(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP, 366, 66, 522, 84, 0, WS_EX_CLIENTEDGE);
+    g_m_hint = c(L"STATIC", L"Settings", SS_LEFT | SS_ENDELLIPSIS, 366, 160, 350, 18, 0, 0, A.bold);
+    g_m_reset = c(L"BUTTON", L"Reset to defaults", BS_PUSHBUTTON | WS_TABSTOP, 738, 156, 150, 26, ID_MOD_RESET);
+    g_m_panel = c(L"BotWNativeModPanel", L"", WS_VSCROLL | WS_TABSTOP, 366, 186, 522, 228, 0, WS_EX_CLIENTEDGE | WS_EX_CONTROLPARENT);
+    c(L"STATIC", L"Settings are saved with the mod list and apply the next time the game starts.", SS_LEFT, 366, 422, 522, 34, 0);
+    // Bottom: adding mods, then Save.
+    c(L"BUTTON", L"Add archive...", BS_PUSHBUTTON | WS_TABSTOP, 12, 484, 110, 28, ID_MOD_ADD);
+    c(L"BUTTON", L"Add folder...", BS_PUSHBUTTON | WS_TABSTOP, 128, 484, 104, 28, ID_MOD_ADDDIR);
+    c(L"BUTTON", L"Import Cemu zip...", BS_PUSHBUTTON | WS_TABSTOP, 238, 484, 140, 28, ID_MOD_IMPORT_ZIP);
+    c(L"BUTTON", L"Import Cemu folder...", BS_PUSHBUTTON | WS_TABSTOP, 384, 484, 156, 28, ID_MOD_IMPORT_DIR);
+    c(L"BUTTON", L"Get packs online", BS_PUSHBUTTON | WS_TABSTOP, 546, 484, 128, 28, ID_MOD_GET);
+    c(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 700, 484, 90, 28, IDCANCEL);
+    c(L"BUTTON", L"Save", BS_DEFPUSHBUTTON | WS_TABSTOP, 798, 484, 90, 28, ID_MODSAVE);
+
+    g_mods = mods::load(fs::path(A.cfg.user));
+    mods_fill_list("");
     EnableWindow(A.wnd, FALSE);
 }
 
@@ -1254,6 +1638,9 @@ static int run(HINSTANCE inst, int show) {
     RegisterClassW(&wc);
     wc.lpfnWndProc = mods_proc;
     wc.lpszClassName = L"BotWNativeMods";
+    RegisterClassW(&wc);
+    wc.lpfnWndProc = mods_panel_proc;
+    wc.lpszClassName = L"BotWNativeModPanel";
     RegisterClassW(&wc);
     wc.lpfnWndProc = gfx_proc;
     wc.lpszClassName = L"BotWNativeGfx";

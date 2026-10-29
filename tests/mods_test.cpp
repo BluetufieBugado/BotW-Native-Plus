@@ -502,6 +502,81 @@ static void test_flexible_layouts_unicode_reorder_and_install(const fs::path& ro
     CHECK(q3.kind == mods::Query::Kind::File && slurp(q3.host) == "direct-link");
 }
 
+// The launcher (launcher/mods.cpp, visible_presets) works out the same settings from the same rules.txt.
+// launcher/launcher_data_test.cpp checks the identical table, so the two cannot drift apart.
+static const char* kVisualPack =
+    "[Definition]\n"
+    "titleIds = 00050000101c9400,00050000101c9500,00050000101c9300\n"
+    "name = \"Visual Tweaks\"\n"
+    "version = 7\n"
+    "\n"
+    "[Default]\n"
+    "$drawDistance = 1.0\n"
+    "$texQuality = 2\n"
+    "\n"
+    "[Preset]\nname = Default (1x)\ncategory = Draw Distance\ndefault = 1\n$drawDistance = 1.0\n"
+    "[Preset]\nname = Far (2x)\ncategory = Draw Distance\n$drawDistance = 2.0\n"
+    "[Preset]\nname = Very far (4x)\ncategory = Draw Distance\n$drawDistance = 4.0   # inline comment\n"
+    "\n"
+    "[Preset]\nname = Normal\ncategory = Texture Quality\ndefault = 1\n$texQuality = 2\n"
+    "[Preset]\nname = High\ncategory = Texture Quality\n$texQuality = 3\n"
+    "[Preset]\nname = Extreme\ncategory = Texture Quality\ncondition = $drawDistance < 4\n$texQuality = 4\n"
+    "\n"
+    "[Preset]\nname = Cull hints on\ncategory = Distant objects\ncondition = $drawDistance >= 2\ndefault = 1\n$cull = 1\n"
+    "[Preset]\nname = Cull hints off\ncategory = Distant objects\ncondition = $drawDistance >= 2\n$cull = 0\n";
+
+static const mods::PresetCategory* find_category(const mods::ModInfo& m, const std::string& name) {
+    for (const auto& pc : m.presets)
+        if (pc.category == name) return &pc;
+    return nullptr;
+}
+
+static void test_preset_conditions_match_launcher(const fs::path& root) {
+    fs::path game = root / "game_vt", user = root / "user_vt";
+    put(game / "content" / "System" / "Version.txt", "v");
+    put(user / "mods" / "Visual Tweaks" / "rules.txt", kVisualPack);
+    put(user / "mods" / "Visual Tweaks" / "content" / "Pack" / "x.pack", "x");
+    put(user / "mods.ini", "[Enabled]\nVisual Tweaks = 1\n");
+    mods::init(game.string(), user.string());
+    CHECK(mods::loaded().size() == 1);
+    if (mods::loaded().size() != 1) return;
+
+    {   // defaults: "Distant objects" needs drawDistance >= 2, so it is hidden
+        const auto& m = mods::loaded()[0];
+        CHECK(m.presets.size() == 2);
+        const auto* dd = find_category(m, "Draw Distance");
+        const auto* tq = find_category(m, "Texture Quality");
+        CHECK(dd && dd->options.size() == 3 && dd->active == "Default (1x)");
+        CHECK(tq && tq->options.size() == 3 && tq->active == "Normal");
+        CHECK(!find_category(m, "Distant objects"));
+    }
+
+    CHECK(mods::set_preset("Visual Tweaks", "Draw Distance", "Far (2x)"));
+    mods::reload();
+    {   // 2x: the dependent category appears with its default
+        const auto& m = mods::loaded()[0];
+        CHECK(m.presets.size() == 3);
+        const auto* far_cat = find_category(m, "Distant objects");
+        CHECK(far_cat && far_cat->options.size() == 2 && far_cat->active == "Cull hints on");
+        const auto* tq = find_category(m, "Texture Quality");
+        CHECK(tq && tq->options.size() == 3);
+    }
+
+    CHECK(mods::set_preset("Visual Tweaks", "Texture Quality", "Extreme"));
+    mods::reload();
+    {
+        const auto* tq = find_category(mods::loaded()[0], "Texture Quality");
+        CHECK(tq && tq->active == "Extreme");
+    }
+
+    CHECK(mods::set_preset("Visual Tweaks", "Draw Distance", "Very far (4x)"));
+    mods::reload();
+    {   // 4x: Extreme is no longer offered and the pick falls back to the default
+        const auto* tq = find_category(mods::loaded()[0], "Texture Quality");
+        CHECK(tq && tq->options.size() == 2 && tq->active == "Normal");
+    }
+}
+
 int main() {
     fs::path root = fs::temp_directory_path() / "botw_mods_test";
     std::error_code ec;
@@ -514,6 +589,7 @@ int main() {
     test_index(root);
     test_presets_textures_shaders_and_patches(root);
     test_flexible_layouts_unicode_reorder_and_install(root);
+    test_preset_conditions_match_launcher(root);
     fs::remove_all(root, ec);
     printf("mods_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
