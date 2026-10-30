@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <mutex>
 #include <numeric>
 #include <string>
@@ -50,11 +51,61 @@ std::unordered_map<std::string, std::unordered_map<uint64_t, uint64_t>> g_thread
 std::unordered_map<std::string, uint64_t> g_mod_counts;
 uint64_t g_prof_ticks = 0;
 
+// Per-thread CPU time (GetThreadTimes). It is cheap, so it also runs without the sampling
+// profiler when BOTW_BENCH_CPU=1 (no SuspendThread, so it barely disturbs the frame rate).
+struct ThreadCpu {
+    std::string name;
+    uint64_t first_k = 0, first_u = 0;  // kernel/user time (100 ns units) when first seen
+    uint64_t last_k = 0, last_u = 0;    // latest reading
+};
+std::unordered_map<uint32_t, ThreadCpu> g_thread_cpu;  // key: Windows thread id
+Clock::time_point g_prof_t0{}, g_prof_t1{};
+uint64_t g_proc_k0 = 0, g_proc_u0 = 0, g_proc_k1 = 0, g_proc_u1 = 0;
+bool g_cpu_only = false;
+
 double elapsed_s(Clock::time_point t0) {
     return std::chrono::duration<double>(Clock::now() - t0).count();
 }
 
 #if defined(_WIN32)
+uint64_t ft64(const FILETIME& ft) { return ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime; }
+
+void record_process(uint64_t& k, uint64_t& u) {
+    FILETIME c, e, kk, uu;
+    if (GetProcessTimes(GetCurrentProcess(), &c, &e, &kk, &uu)) {
+        k = ft64(kk);
+        u = ft64(uu);
+    }
+}
+
+void record_cpu(HANDLE h, const std::string& name, bool initial) {
+    if (!h) return;
+    DWORD tid = GetThreadId(h);
+    if (!tid) return;
+    FILETIME c, e, k, u;
+    if (!GetThreadTimes(h, &c, &e, &k, &u)) return;  // exited thread: keep the last reading
+    uint64_t kk = ft64(k), uu = ft64(u);
+    auto it = g_thread_cpu.find(tid);
+    if (it == g_thread_cpu.end()) {
+        ThreadCpu t;
+        t.name = name;
+        if (initial) {  // thread already existed when the window started
+            t.first_k = kk;
+            t.first_u = uu;
+        }  // otherwise it was created during the window: it started from zero
+        it = g_thread_cpu.emplace((uint32_t)tid, std::move(t)).first;
+    }
+    it->second.last_k = kk;
+    it->second.last_u = uu;
+}
+
+void record_all_cpu(const std::vector<std::pair<void*, std::string>>& live, bool initial) {
+    pthread_t gpu = g_gpu_thread.load(std::memory_order_relaxed);
+    if (gpu) record_cpu((HANDLE)pthread_gethandle(gpu), "LatteThread", initial);
+    for (auto& [h, name] : live) record_cpu((HANDLE)h, name, initial);
+    record_cpu(GetCurrentThread(), "(bench profiler)", initial);
+}
+
 void sample_handle(HANDLE h, const std::string& name, uintptr_t base, uintptr_t end) {
     if (!h || GetThreadId(h) == GetCurrentThreadId()) return;
     if (SuspendThread(h) == (DWORD)-1) return;
@@ -99,20 +150,34 @@ void profiler_loop() {
     }
     std::vector<std::pair<void*, std::string>> live;
     uint64_t iter = 0;
+    const uint64_t refresh_every = g_opt.profile ? 50 : 5;
+    g_prof_t0 = Clock::now();
+    record_process(g_proc_k0, g_proc_u0);
     while (g_prof_run.load(std::memory_order_relaxed)) {
-        if ((iter++ % 50) == 0) live = threads::snapshot_live_handles();
-        pthread_t gpu = g_gpu_thread.load(std::memory_order_relaxed);
-        if (gpu) sample_handle((HANDLE)pthread_gethandle(gpu), "LatteThread", base, end);
-        for (auto& [h, name] : live) sample_handle((HANDLE)h, name, base, end);
+        if ((iter++ % refresh_every) == 0) {
+            live = threads::snapshot_live_handles();
+            record_all_cpu(live, iter == 1);  // first pass = the starting reading
+        }
+        if (g_opt.profile) {
+            pthread_t gpu = g_gpu_thread.load(std::memory_order_relaxed);
+            if (gpu) sample_handle((HANDLE)pthread_gethandle(gpu), "LatteThread", base, end);
+            for (auto& [h, name] : live) sample_handle((HANDLE)h, name, base, end);
+        }
         g_prof_ticks++;
-        Sleep(2);
+        Sleep(g_opt.profile ? 2 : 100);
     }
+    live = threads::snapshot_live_handles();
+    record_all_cpu(live, false);  // final reading
+    record_process(g_proc_k1, g_proc_u1);
+    g_prof_t1 = Clock::now();
 }
 #endif
 
 void start_profiler() {
 #if defined(_WIN32)
-    if (!g_opt.profile || g_prof_run) return;
+    const char* env = getenv("BOTW_BENCH_CPU");
+    g_cpu_only = env && *env && *env != '0';
+    if ((!g_opt.profile && !g_cpu_only) || g_prof_run) return;
     g_prof_run = true;
     g_prof_thread = std::thread(profiler_loop);
 #endif
@@ -127,6 +192,39 @@ void stop_profiler() {
     FILE* f = fopen(path.c_str(), "w");
     if (!f) return;
     fprintf(f, "ticks=%llu\n", (unsigned long long)g_prof_ticks);
+
+    {
+        // CPU time per thread over the measured window (GetThreadTimes). Unlike the samples
+        // below, this says how much CPU each thread really used, not where it was stopped.
+        double wall = std::chrono::duration<double>(g_prof_t1 - g_prof_t0).count();
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        unsigned ncpu = si.dwNumberOfProcessors ? si.dwNumberOfProcessors : 1;
+        auto d = [](uint64_t a, uint64_t b) -> double { return b > a ? (double)(b - a) / 10000.0 : 0.0; };  // ms
+        double proc_ms = d(g_proc_k0, g_proc_k1) + d(g_proc_u0, g_proc_u1);
+        double one_core = wall > 0.0 ? proc_ms / (wall * 10.0) : 0.0;  // % of one core
+        fprintf(f, "\n[cpu_time]\n");
+        fprintf(f, "window_s=%.2f logical_cpus=%u profile_sampling=%d\n", wall, ncpu, (int)g_opt.profile);
+        fprintf(f, "process_cpu_ms=%.0f  %.0f%% of one core  %.0f%% of all %u cores\n", proc_ms, one_core, one_core / ncpu,
+                ncpu);
+        struct Row {
+            double total, user, kern;
+            uint32_t tid;
+            std::string name;
+        };
+        std::vector<Row> rows;
+        for (auto& [tid, t] : g_thread_cpu) {
+            double ku = d(t.first_k, t.last_k), uu = d(t.first_u, t.last_u);
+            rows.push_back({ku + uu, uu, ku, tid, t.name});
+        }
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.total > b.total; });
+        fprintf(f, "%10s %9s %10s %10s %7s  %s\n", "cpu_ms", "%core", "user_ms", "kernel_ms", "tid", "name");
+        for (auto& r : rows)
+            fprintf(f, "%10.0f %8.1f%% %10.0f %10.0f %7u  %s\n", r.total, wall > 0.0 ? r.total / (wall * 10.0) : 0.0, r.user,
+                    r.kern, r.tid, r.name.c_str());
+        fprintf(f, "(threads that exited before the end count up to their last reading;\n"
+                   " the bench profiler thread is listed so its own cost can be subtracted)\n");
+    }
     std::vector<std::pair<uint64_t, std::string>> mods;
     for (auto& [k, v] : g_mod_counts) mods.push_back({v, k});
     std::sort(mods.rbegin(), mods.rend());
