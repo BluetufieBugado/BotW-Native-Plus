@@ -83,11 +83,11 @@ minutes and 2000 frames, and only frees more when a GPU allocation *fails*, whic
 happens after the PC is already paging. On a 4 GB machine that shows up as multi-second stalls
 (the log shows even a one-line `LOG` taking seconds) and sometimes a crash.
 
-On an integrated GPU in a PC with 6 GB of RAM or less, unused RAM-only textures are now dropped
+This mode is **off by default** (it caused stutter in testing on a 4 GB PC). With `BOTW_LOWMEM=1`, unused RAM-only textures are dropped
 after 20 s and 200 frames instead. They are rebuilt from guest memory if they are needed again, which
 costs a little CPU when you return to an area. `runtime.log` says
 `Low-memory texture cache: on (...)` when it is active.
 
-- `BOTW_LOWMEM=0` turns it off, `BOTW_LOWMEM=1` forces it on (set it in the shell before starting).
+- `BOTW_LOWMEM=1` turns it on (set it in the shell before starting). Unset or `0` leaves it off.
 - Also set a fixed pagefile (initial 4096 MB, maximum 8192 MB) and close other programs; the game
   itself needs 0.8 to 1.2 GB resident.

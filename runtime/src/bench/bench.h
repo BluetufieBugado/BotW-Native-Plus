@@ -3,7 +3,9 @@
 // until the frame looks like gameplay), lets the scene settle, measures game frame times for N
 // seconds, writes <user root>/bench.txt and exits. --bench-uncap raises the virtual vsync rate so
 // the frame rate is limited by the emulation work, not by the 60 Hz pacing. --bench-profile adds a
-// sampling profiler (Windows) that writes <user root>/bench_profile.txt.
+// sampling profiler (Windows) that writes <user root>/bench_profile.txt. That file also has a
+// [cpu_time] section with the CPU time of each thread (GetThreadTimes). Set BOTW_BENCH_CPU=1 to get
+// only that section, without the sampling (which suspends threads and slows the run).
 #include <cstdint>
 
 namespace bench {
